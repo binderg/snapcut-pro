@@ -37,7 +37,19 @@ interface Lane {
 
 type Drag =
   | { kind: "scrub" }
-  | { kind: "move"; clip: Clip; ids: Set<string>; x0: number; y0: number; dx: number; lane: Lane | null; moved: boolean }
+  | {
+      kind: "move";
+      clip: Clip;
+      ids: Set<string>;
+      x0: number;
+      y0: number;
+      dx: number;
+      lane: Lane | null;
+      moved: boolean;
+      /** Where the clip will land (frames) and how far other clips get pushed to make room. */
+      dest: number;
+      shift: Map<string, number>;
+    }
   | { kind: "trim"; clip: Clip; side: "in" | "out"; x0: number; dx: number };
 
 const C = {
@@ -241,14 +253,23 @@ export function Timeline(props: { project: Project; engine: Engine; playhead: nu
     const dragIds = d?.kind === "move" ? d.ids : d?.kind === "trim" ? new Set([d.clip.id]) : null;
     const selIds = selected ? linkedIds(project, project.tracks.flatMap((t) => t.clips).find((c) => c.id === selected) ?? ({ id: selected } as Clip)) : new Set<string>();
 
-    for (const l of lanes) {
-      for (const c of l.track.clips) {
+    // Dragged clips go last so they draw on top of the clips they pass over.
+    const order: [Lane, Clip][] = [];
+    for (const l of lanes) for (const c of l.track.clips) if (!dragIds?.has(c.id) || d?.kind !== "move") order.push([l, c]);
+    if (d?.kind === "move") for (const l of lanes) for (const c of l.track.clips) if (dragIds!.has(c.id)) order.push([l, c]);
+
+    for (const [l, c] of order) {
+      {
         let start = c.start, end = c.end, y = l.y, h = l.h, offset = 0;
         if (d?.kind === "move" && dragIds!.has(c.id)) {
           offset = d.dx;
           start += offset;
           end += offset;
           if (c.id === d.clip.id && d.lane && d.lane.track.kind === l.track.kind) { y = d.lane.y; h = d.lane.h; }
+        } else if (d?.kind === "move" && d.shift.has(c.id)) {
+          offset = d.shift.get(c.id)!;
+          start += offset;
+          end += offset;
         } else if (d?.kind === "trim" && c.id === d.clip.id) {
           if (d.side === "in") start = Math.min(c.end - 1, c.start + d.dx);
           else end = Math.max(c.start + 1, c.end + d.dx);
@@ -300,6 +321,20 @@ export function Timeline(props: { project: Project; engine: Engine; playhead: nu
         g.stroke();
       }
       g.lineWidth = 1;
+    }
+
+    if (d?.kind === "move" && d.moved && drag) {
+      const lane = d.lane && d.lane.track.kind === d.clip.kind ? d.lane : lanes.find((l) => l.track.id === d.clip.trackId);
+      if (lane) {
+        const x = Math.round(xOf(d.dest)) + 0.5;
+        g.strokeStyle = C.drop;
+        g.lineWidth = 3;
+        g.beginPath();
+        g.moveTo(x, lane.y - 2);
+        g.lineTo(x, lane.y + lane.h + 2);
+        g.stroke();
+        g.lineWidth = 1;
+      }
     }
 
     if (snapAt != null) {
@@ -357,7 +392,7 @@ export function Timeline(props: { project: Project; engine: Engine; playhead: nu
     }
     actions.select(h.clip.id);
     if (h.edge) setDrag({ kind: "trim", clip: h.clip, side: h.edge, x0: x, dx: 0 });
-    else setDrag({ kind: "move", clip: h.clip, ids: linkedIds(project, h.clip), x0: x, y0: y, dx: 0, lane: laneAt(y), moved: false });
+    else setDrag({ kind: "move", clip: h.clip, ids: linkedIds(project, h.clip), x0: x, y0: y, dx: 0, lane: laneAt(y), moved: false, dest: h.clip.start, shift: new Map() });
   };
 
   const onContextMenu = (e: React.MouseEvent) => {
@@ -418,6 +453,49 @@ export function Timeline(props: { project: Project; engine: Engine; playhead: nu
     return [-(dur - 1), Math.max(0, left)];
   };
 
+  /**
+   * Where a dragged clip lands. Over another clip it never cuts it: the front half of that clip
+   * puts the dragged one before it, the back half after it. The pointer decides when it is over
+   * another clip, else the dragged clip's new start does. The engine then pushes what is in the
+   * way right just far enough (`edit.move` with `push`); `shift` previews that, linked clips included.
+   */
+  const landing = (drag: Extract<Drag, { kind: "move" }>, dx: number, pointer: number, lane: Lane | null) => {
+    const track = lane && lane.track.kind === drag.clip.kind ? lane.track : project.tracks.find((t) => t.id === drag.clip.trackId)!;
+    const others = track.clips.filter((c) => !drag.ids.has(c.id));
+    const half = (c: Clip, f: number) => (f - c.start < (c.end - c.start) / 2 ? c.start : c.end);
+    const start = drag.clip.start + dx;
+    const over = others.find((c) => c.start < pointer && pointer < c.end);
+    const under = others.find((c) => c.start < start && start < c.end);
+    const dest = over ? half(over, pointer) : under ? half(under, start) : start;
+
+    const shift = new Map<string, number>();
+    const len = drag.clip.end - drag.clip.start;
+    const next = Math.min(...others.filter((c) => c.start >= dest).map((c) => c.start));
+    const amount = Math.max(0, dest + len - next);
+    if (amount > 0 && Number.isFinite(amount)) {
+      // The track itself from `dest`; other tracks from the first partner of anything that moved.
+      const from = new Map<string, number>([[track.id, dest]]);
+      for (let grew = true; grew; ) {
+        grew = false;
+        const links = new Set<string>();
+        for (const t of project.tracks) {
+          const f = from.get(t.id);
+          if (f != null) for (const c of t.clips) if (c.start >= f && c.link && !drag.ids.has(c.id)) links.add(c.link);
+        }
+        for (const t of project.tracks) {
+          if (t.id === track.id) continue;
+          const first = Math.min(...t.clips.filter((c) => c.link && links.has(c.link) && !drag.ids.has(c.id)).map((c) => c.start));
+          if (Number.isFinite(first) && (from.get(t.id) ?? Infinity) > first) { from.set(t.id, first); grew = true; }
+        }
+      }
+      for (const t of project.tracks) {
+        const f = from.get(t.id);
+        if (f != null) for (const c of t.clips) if (c.start >= f && !drag.ids.has(c.id)) shift.set(c.id, amount);
+      }
+    }
+    return { dest, shift };
+  };
+
   /** Apply a drag position; returns the new drag state so a release can use it at once. */
   const applyDrag = (x: number, y: number, drag: Drag): Drag | null => {
     if (drag.kind === "scrub") {
@@ -434,7 +512,9 @@ export function Timeline(props: { project: Project; engine: Engine; playhead: nu
       else if (p2 != null) { dx = s2 - drag.clip.end; sp = p2; }
       dx = Math.max(dx, -drag.clip.start);
       setSnapAt(moved ? sp : null);
-      const next = { ...drag, dx, moved, lane: laneAt(y) ?? drag.lane };
+      const lane = laneAt(y) ?? drag.lane;
+      const { dest, shift } = landing(drag, dx, frameOf(x), lane);
+      const next = { ...drag, dx, moved, lane, dest, shift };
       setDrag(next);
       setHoverCursor("grabbing");
       return next;
@@ -468,9 +548,10 @@ export function Timeline(props: { project: Project; engine: Engine; playhead: nu
     if (!d) return;
     if (d.kind === "move" && d.moved) {
       const track = d.lane && d.lane.track.kind === d.clip.kind && d.lane.track.id !== d.clip.trackId ? d.lane.track.name : undefined;
-      if (d.dx !== 0 || track) {
-        setSettle({ rev: project.revision, d });
-        actions.move(d.clip.id, d.clip.start + d.dx, track);
+      if (d.dest !== d.clip.start || track) {
+        // Until the engine answers, draw the clip where it lands, not where it was let go.
+        setSettle({ rev: project.revision, d: { ...d, dx: d.dest - d.clip.start } });
+        actions.move(d.clip.id, d.dest, track, true);
       }
     } else if (d.kind === "trim" && d.dx !== 0) {
       setSettle({ rev: project.revision, d });
