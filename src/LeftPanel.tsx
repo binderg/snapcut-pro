@@ -4,6 +4,7 @@ import type { Actions } from "./Editor";
 import { Asset, at, Clip, Project, shortTime, timecode } from "./model";
 import { isTauri, pickMedia } from "./host";
 import { Icon } from "./icons";
+import { TransitionsTab } from "./TransitionsTab";
 
 type Tab = "media" | "effects" | "transitions" | "markers" | "analyze" | "history";
 
@@ -30,7 +31,7 @@ export function LeftPanel(props: { project: Project; engine: Engine; actions: Ac
       </div>
       {tab === "media" && <MediaTab {...props} />}
       {tab === "effects" && <FxTab {...props} kind="effect" />}
-      {tab === "transitions" && <FxTab {...props} kind="transition" />}
+      {tab === "transitions" && <TransitionsTab engine={props.engine} playhead={props.playhead} selected={props.selected} />}
       {tab === "markers" && <MarkersTab {...props} />}
       {tab === "analyze" && <AnalyzeTab {...props} />}
       {tab === "history" && <HistoryTab {...props} />}
