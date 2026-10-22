@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { Engine } from "./engine";
-import { at, Clip } from "./model";
+import { at, Clip, TRANSITION_MIME } from "./model";
 import { ENGINE_PREVIEWS, getRenderer, GlTransition, H, sceneImage, W } from "./gl/preview";
 
 /** Engine ids of the GL Transitions, once the engine ships them (see the importer script). */
@@ -71,7 +71,7 @@ export function TransitionsTab({ engine, playhead, selected }: { engine: Engine;
 
   const shownBuiltin = filter(builtin);
   const shownGl = filter(glItems);
-  const hint = video ? `Goes on the cut at the end of ${video.name || video.id}.` : "Goes on the cut at the playhead, or select the clip before the cut.";
+  const hint = video ? `Click to put it on the cut at the end of ${video.name || video.id}, or drag it onto any cut.` : "Drag a card onto a cut in the timeline, or click to use the cut at the playhead.";
 
   return (
     <div className="single stack">
@@ -81,9 +81,9 @@ export function TransitionsTab({ engine, playhead, selected }: { engine: Engine;
       </div>
       <p className="note" style={{ margin: 0 }}>{hint} Move the mouse over a card to scrub the transition.</p>
       {shownBuiltin.length > 0 && <div className="section-title">Built in</div>}
-      <div className="tr-grid">{shownBuiltin.map((i) => <Card key={i.key} item={i} onApply={() => apply(i)} />)}</div>
+      <div className="tr-grid">{shownBuiltin.map((i) => <Card key={i.key} item={i} duration={duration} onApply={() => apply(i)} />)}</div>
       {shownGl.length > 0 && <div className="section-title">GL Transitions ({shownGl.length})</div>}
-      <div className="tr-grid">{shownGl.map((i) => <Card key={i.key} item={i} onApply={() => apply(i)} />)}</div>
+      <div className="tr-grid">{shownGl.map((i) => <Card key={i.key} item={i} duration={duration} onApply={() => apply(i)} />)}</div>
       {gl.length === 0 && <div className="spinner" />}
       {shownBuiltin.length + shownGl.length === 0 && gl.length > 0 && <p className="note">No transitions found.</p>}
       <p className="note">GL Transitions are by their authors (MIT unless a card says otherwise). Cards marked "preview only" are not in the engine yet.</p>
@@ -91,7 +91,7 @@ export function TransitionsTab({ engine, playhead, selected }: { engine: Engine;
   );
 }
 
-function Card({ item, onApply }: { item: Item; onApply: () => void }) {
+function Card({ item, duration, onApply }: { item: Item; duration: string; onApply: () => void }) {
   const ref = useRef<HTMLCanvasElement>(null);
   const [p, setP] = useState<number | null>(null);
   const [broken, setBroken] = useState(false);
@@ -119,10 +119,17 @@ function Card({ item, onApply }: { item: Item; onApply: () => void }) {
   return (
     <div
       className={`tr-card ${usable ? "" : "off"}`}
+      draggable={usable}
+      onDragStart={(e) => {
+        if (!item.engineId) return;
+        e.dataTransfer.setData(TRANSITION_MIME, JSON.stringify({ transition: item.engineId, duration }));
+        e.dataTransfer.effectAllowed = "copy";
+        setP(null);
+      }}
       onMouseMove={move}
       onMouseLeave={() => setP(null)}
       onClick={onApply}
-      title={`${item.name}${item.detail ? `\n${item.detail}` : ""}${usable ? "\nClick to add at the cut" : "\nPreview only: not in the engine yet"}`}
+      title={`${item.name}${item.detail ? `\n${item.detail}` : ""}${usable ? "\nDrag onto a cut, or click to add at the cut" : "\nPreview only: not in the engine yet"}`}
     >
       <div className="tr-thumb">
         <canvas ref={ref} width={W} height={H} />
