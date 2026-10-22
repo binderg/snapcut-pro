@@ -1,14 +1,24 @@
 // Live previews of GL Transitions shaders for the transition cards. One shared WebGL
 // context renders into a small offscreen canvas; a card copies the result into its own
 // 2D canvas. Shaders compile on first hover, and a shader that fails to compile just
-// gets no preview. The previews run the original GLSL; the engine's own renders are
-// separate and use WGSL.
+// gets no preview. The previews run the original GLSL; the engine renders the WGSL
+// that scripts/import_gl_transitions.py converted from it (`engine` on each entry).
 
 export interface GlParam {
   type: string;
   name: string;
   default: string;
   doc: string;
+}
+
+/** What the editor sends to `fx.define` the first time a project uses a GL Transition. */
+export interface GlEngine {
+  /** `effect.json`: id `project.gl-<id>`, kind `transition`. */
+  manifest: { id: string; params: { properties: Record<string, { title?: string; default?: unknown }> } } & Record<string, unknown>;
+  /** The converted WGSL (keeps the original author and license header). */
+  wgsl: string;
+  /** Images for sampler params (default luma or displacement map): file name to base64 PNG. */
+  files: Record<string, string>;
 }
 
 export interface GlTransition {
@@ -20,6 +30,9 @@ export interface GlTransition {
   tags: string[];
   params: GlParam[];
   glsl: string;
+  /** The engine version, or null when the converter could not make one (see `engine_error`). */
+  engine?: GlEngine | null;
+  engine_error?: string;
 }
 
 export const W = 320;
@@ -94,6 +107,8 @@ vec4 getToColor(vec2 uv){ return texture2D(to, vec2(uv.x, 1.0 - uv.y)); }
 interface Program {
   prog: WebGLProgram;
   progressLoc: WebGLUniformLocation | null;
+  /** Texture per extra sampler unit (2, 3, ...). */
+  samplers: WebGLTexture[];
 }
 
 class Renderer {
@@ -101,6 +116,7 @@ class Renderer {
   gl: WebGLRenderingContext;
   programs = new Map<string, Program | null>();
   tex: WebGLTexture[] = [];
+  images = new Map<string, WebGLTexture>();
 
   constructor() {
     this.canvas.width = W;
@@ -115,7 +131,7 @@ class Renderer {
     gl.viewport(0, 0, W, H);
   }
 
-  texture(src: HTMLCanvasElement): WebGLTexture {
+  texture(src: HTMLCanvasElement | HTMLImageElement): WebGLTexture {
     const gl = this.gl;
     const t = gl.createTexture()!;
     gl.bindTexture(gl.TEXTURE_2D, t);
@@ -124,6 +140,30 @@ class Renderer {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    return t;
+  }
+
+  /**
+   * The image the engine version binds for a sampler param (its default luma or
+   * displacement map), so the preview matches engine renders. Upright like GL
+   * Transitions expect (flipped on upload). Shows the grey pattern until it decodes.
+   */
+  image(name: string, b64: string): WebGLTexture {
+    const have = this.images.get(name);
+    if (have) return have;
+    const t = this.tex[2];
+    const img = new Image();
+    img.onload = () => {
+      const gl = this.gl;
+      const tex = this.texture(img);
+      gl.bindTexture(gl.TEXTURE_2D, tex);
+      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, img);
+      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+      this.images.set(name, tex);
+      for (const p of this.programs.values()) if (p) p.samplers = p.samplers.map((s) => (s === t ? tex : s));
+    };
+    img.src = `data:image/png;base64,${b64}`;
     return t;
   }
 
@@ -151,11 +191,18 @@ class Renderer {
     gl.uniform1i(gl.getUniformLocation(prog, "to"), 1);
     gl.uniform1f(gl.getUniformLocation(prog, "ratio"), W / H);
     let unit = 2;
+    const samplers: WebGLTexture[] = [];
+    const props = Object.values(t.engine?.manifest.params.properties ?? {});
     for (const p of t.params) {
       const loc = gl.getUniformLocation(prog, p.name);
-      if (loc) setUniform(gl, loc, p, unit) && unit++;
+      if (loc && setUniform(gl, loc, p, unit)) {
+        unit++;
+        const file = props.find((q) => q.title === p.name)?.default;
+        const b64 = typeof file === "string" ? t.engine?.files[file] : undefined;
+        samplers.push(typeof file === "string" && b64 ? this.image(file, b64) : this.tex[2]);
+      }
     }
-    return { prog, progressLoc: gl.getUniformLocation(prog, "progress") };
+    return { prog, progressLoc: gl.getUniformLocation(prog, "progress"), samplers };
   }
 
   /** Draw one frame; null if the shader does not compile here. */
@@ -175,10 +222,10 @@ class Renderer {
     gl.bindTexture(gl.TEXTURE_2D, this.tex[0]);
     gl.activeTexture(gl.TEXTURE1);
     gl.bindTexture(gl.TEXTURE_2D, this.tex[1]);
-    for (let u = 2; u < 6; u++) {
-      gl.activeTexture(gl.TEXTURE0 + u);
-      gl.bindTexture(gl.TEXTURE_2D, this.tex[2]);
-    }
+    p.samplers.forEach((tex, i) => {
+      gl.activeTexture(gl.TEXTURE0 + 2 + i);
+      gl.bindTexture(gl.TEXTURE_2D, tex);
+    });
     gl.uniform1f(p.progressLoc, Math.max(0, Math.min(1, progress)));
     gl.drawArrays(gl.TRIANGLES, 0, 6);
     return this.canvas;
