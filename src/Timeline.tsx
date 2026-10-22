@@ -284,12 +284,21 @@ export function Timeline(props: { project: Project; engine: Engine; playhead: nu
     // Drop indicator.
     if (dropAt) {
       const x = Math.round(xOf(dropAt.frame)) + 0.5;
-      g.strokeStyle = C.drop;
-      g.lineWidth = 2;
+      g.strokeStyle = hexA(C.drop, 0.35);
+      g.lineWidth = 1;
       g.beginPath();
       g.moveTo(x, RULER_H);
       g.lineTo(x, size.h);
       g.stroke();
+      if (dropAt.lane) {
+        // Solid on the track the clip goes to.
+        g.strokeStyle = C.drop;
+        g.lineWidth = 3;
+        g.beginPath();
+        g.moveTo(x, dropAt.lane.y - 2);
+        g.lineTo(x, dropAt.lane.y + dropAt.lane.h + 2);
+        g.stroke();
+      }
       g.lineWidth = 1;
     }
 
@@ -500,24 +509,38 @@ export function Timeline(props: { project: Project; engine: Engine; playhead: nu
   }, []);
 
   // ---------- drop from the media panel ----------
+  /**
+   * Where a media drop lands. The picture (or, for audio-only media, the sound) goes on the lane under
+   * the pointer if it is the right kind, else on the first track of that kind, as the engine does.
+   * Over a clip it never cuts it: the front half puts the new clip before it, the back half after it.
+   * The engine pushes later clips on that track, and their linked partners, to make room.
+   */
+  const dropTarget = (x: number, y: number, kind: "video" | "audio") => {
+    const lane = laneAt(y);
+    const track = lane && lane.track.kind === kind ? lane.track : project.tracks.find((t) => t.kind === kind) ?? null;
+    const raw = frameOf(x);
+    const over = track?.clips.find((c) => c.start < raw && raw < c.end);
+    const frame = over ? (raw - over.start < (over.end - over.start) / 2 ? over.start : over.end) : snap(raw, snapPoints(new Set()))[0];
+    return { frame, lane: track ? lanes.find((l) => l.track.id === track.id) ?? null : null };
+  };
+
   const onDragOver = (e: React.DragEvent) => {
-    if (!e.dataTransfer.types.includes("application/x-ve-asset")) return;
+    const types = e.dataTransfer.types;
+    if (!types.includes("application/x-ve-asset")) return;
     e.preventDefault();
     e.dataTransfer.dropEffect = "copy";
     const { x, y } = local(e);
-    const [f] = snap(frameOf(x), snapPoints(new Set()));
-    setDropAt({ frame: f, lane: laneAt(y) });
+    setDropAt(dropTarget(x, y, types.includes("application/x-ve-asset-audio") ? "audio" : "video"));
   };
   const onDrop = (e: React.DragEvent) => {
     const id = e.dataTransfer.getData("application/x-ve-asset");
-    const d = dropAt;
     setDropAt(null);
-    if (!id || !d) return;
+    if (!id) return;
     e.preventDefault();
     const asset = project.assets.find((a) => a.id === id);
-    const wantsKind = asset?.video ? "video" : "audio";
-    const track = d.lane && d.lane.track.kind === wantsKind ? d.lane.track.name : undefined;
-    actions.insert(id, d.frame, track);
+    const { x, y } = local(e);
+    const d = dropTarget(x, y, asset?.video ? "video" : "audio");
+    actions.insert(id, d.frame, d.lane?.track.name);
   };
 
   const sel = selected != null;
