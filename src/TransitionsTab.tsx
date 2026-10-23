@@ -3,8 +3,12 @@ import type { Engine } from "./engine";
 import { at, Clip, TRANSITION_MIME } from "./model";
 import { ENGINE_PREVIEWS, getRenderer, GlTransition, H, sceneImage, W } from "./gl/preview";
 
-/** Engine ids of the GL Transitions, once the engine ships them (see the importer script). */
-export const glEngineId = (id: string) => `gl.transitions/${id}`;
+/**
+ * Engine id of a GL Transition. They are not built into the engine: the editor ships
+ * the converted WGSL (scripts/import_gl_transitions.py) and defines it in the project
+ * with `fx.define` the first time it is used, so the project renders anywhere.
+ */
+export const glEngineId = (id: string) => `project.gl-${id}`;
 
 interface FxEntry {
   id: string;
@@ -20,6 +24,8 @@ interface Item {
   name: string;
   /** The engine's id when it can apply this transition, else null (preview only). */
   engineId: string | null;
+  /** GL Transitions: what `fx.define` needs when the project does not have it yet. */
+  gl: GlTransition | null;
   preview: GlTransition | null;
   detail: string;
   search: string;
@@ -32,22 +38,24 @@ export function TransitionsTab({ engine, playhead, selected }: { engine: Engine;
   const [gl, setGl] = useState<GlTransition[]>([]);
   const [q, setQ] = useState("");
   const [duration, setDuration] = useState("0.5s");
+  const [problem, setProblem] = useState<string | null>(null);
 
+  const loadFx = () => engine.query<{ effects: FxEntry[] }>("fx.list").then((r) => setFx(r.effects ?? []), () => setFx([]));
   useEffect(() => {
-    engine.query<{ effects: FxEntry[] }>("fx.list").then((r) => setFx(r.effects ?? []), () => setFx([]));
+    loadFx();
     import("./gl/transitions.json").then((m: any) => setGl((m.default ?? m).transitions as GlTransition[]));
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const video = selected?.kind === "video" ? selected : null;
 
   const { builtin, glItems } = useMemo(() => {
-    const engineIds = new Set((fx ?? []).filter((e) => e.kind === "transition").map((e) => e.id));
     const builtin: Item[] = (fx ?? [])
-      .filter((e) => e.kind === "transition" && !e.id.startsWith("gl.transitions/"))
+      .filter((e) => e.kind === "transition" && !e.id.startsWith(glEngineId("")))
       .map((e) => ({
         key: e.id,
         name: e.name,
         engineId: e.id,
+        gl: null,
         preview: ENGINE_PREVIEWS[e.id] ? { id: e.id, name: e.name, author: "", license: "", description: "", tags: [], params: [], glsl: ENGINE_PREVIEWS[e.id] } : null,
         detail: e.description ?? "",
         search: `${e.name} ${e.description ?? ""}`.toLowerCase(),
@@ -55,7 +63,8 @@ export function TransitionsTab({ engine, playhead, selected }: { engine: Engine;
     const glItems: Item[] = gl.map((t) => ({
       key: `gl:${t.id}`,
       name: t.name || titleCase(t.id),
-      engineId: engineIds.has(glEngineId(t.id)) ? glEngineId(t.id) : null,
+      engineId: t.engine ? glEngineId(t.id) : null,
+      gl: t,
       preview: t,
       detail: [t.description, t.author && `by ${t.author}`, t.license && t.license !== "MIT" && `license: ${t.license}`].filter(Boolean).join(" · "),
       search: `${t.name} ${t.id} ${t.tags.join(" ")} ${t.author} ${t.description}`.toLowerCase(),
@@ -64,9 +73,21 @@ export function TransitionsTab({ engine, playhead, selected }: { engine: Engine;
   }, [fx, gl]);
 
   const filter = (items: Item[]) => items.filter((i) => i.search.includes(q.toLowerCase()));
-  const apply = (i: Item) => {
-    if (!i.engineId || engine.busy) return;
-    engine.mutate("transition.add", { transition: i.engineId, duration, ...(video ? { clip: video.id } : { at: at(playhead) }) });
+  const apply = async (i: Item) => {
+    if (!i.engineId || engine.busy || fx === null) return;
+    setProblem(null);
+    // First use of a GL Transition in this project: save it into the project's effects/ folder.
+    const gl = i.gl?.engine;
+    if (gl && !fx.some((e) => e.id === i.engineId)) {
+      try {
+        await engine.query("fx.define", { manifest: gl.manifest, source: gl.wgsl, files: gl.files }, `Adding ${i.name}`);
+      } catch (e: any) {
+        setProblem(`${i.name}: the engine refused it: ${e?.message ?? e}`);
+        return;
+      }
+      await loadFx();
+    }
+    await engine.mutate("transition.add", { transition: i.engineId, duration, ...(video ? { clip: video.id } : { at: at(playhead) }) });
   };
 
   const shownBuiltin = filter(builtin);
@@ -80,13 +101,17 @@ export function TransitionsTab({ engine, playhead, selected }: { engine: Engine;
         <input className="input mono" style={{ width: 70 }} title="Duration" value={duration} onChange={(e) => setDuration(e.target.value)} />
       </div>
       <p className="note" style={{ margin: 0 }}>{hint} Move the mouse over a card to scrub the transition.</p>
+      {problem && <div className="err">{problem}</div>}
       {shownBuiltin.length > 0 && <div className="section-title">Built in</div>}
       <div className="tr-grid">{shownBuiltin.map((i) => <Card key={i.key} item={i} duration={duration} onApply={() => apply(i)} />)}</div>
       {shownGl.length > 0 && <div className="section-title">GL Transitions ({shownGl.length})</div>}
       <div className="tr-grid">{shownGl.map((i) => <Card key={i.key} item={i} duration={duration} onApply={() => apply(i)} />)}</div>
       {gl.length === 0 && <div className="spinner" />}
       {shownBuiltin.length + shownGl.length === 0 && gl.length > 0 && <p className="note">No transitions found.</p>}
-      <p className="note">GL Transitions are by their authors (MIT unless a card says otherwise). Cards marked "preview only" are not in the engine yet.</p>
+      <p className="note">
+        GL Transitions are by their authors (MIT unless a card says otherwise). The first use copies one into the project's effects folder.
+        {glItems.some((i) => !i.engineId) && ' Cards marked "Preview" did not convert for the engine.'}
+      </p>
     </div>
   );
 }
@@ -129,7 +154,7 @@ function Card({ item, duration, onApply }: { item: Item; duration: string; onApp
       onMouseMove={move}
       onMouseLeave={() => setP(null)}
       onClick={onApply}
-      title={`${item.name}${item.detail ? `\n${item.detail}` : ""}${usable ? "\nDrag onto a cut, or click to add at the cut" : "\nPreview only: not in the engine yet"}`}
+      title={`${item.name}${item.detail ? `\n${item.detail}` : ""}${usable ? "\nClick to add at the cut" : `\nPreview only: ${item.gl?.engine_error?.split("\n")[0] ?? "not in the engine yet"}`}`}
     >
       <div className="tr-thumb">
         <canvas ref={ref} width={W} height={H} />
