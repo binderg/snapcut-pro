@@ -25,7 +25,8 @@ export interface Actions {
   addMarker: () => void;
   removeMarker: (id: string) => void;
   insert: (asset: string, frame?: number, track?: string) => void;
-  move: (clip: string, frame: number, track?: string) => void;
+  /** `push` (ui.move_push): move what is in the way right instead of overwriting it. `reorder`: swap places. */
+  move: (clip: string, frame: number, track?: string, mode?: "push" | "reorder") => void;
   trim: (clip: string, side: "in" | "out", frames: number) => void;
   setSpeed: (clip: string, speed: string) => void;
   setVolume: (clip: string, db: number) => void;
@@ -146,7 +147,10 @@ export function Editor({ rpc, projectPath, onClose }: { rpc: Rpc; projectPath: s
       removeMarker: (id) => mutate("marker.remove", { ids: [id] }),
       insert: (asset, frame, track) =>
         mutate("edit.insert", { asset, at: at(frame ?? playheadRef.current), ...(track ? { track } : {}) }),
-      move: (clip, frame, track) => mutate("edit.move", { clip, to: at(frame), ...(track ? { track } : {}) }),
+      move: (clip, frame, track, mode) =>
+        mode === "push"
+          ? mutate("ui.move_push", { clip, to: at(frame), ...(track ? { track } : {}) })
+          : mutate("edit.move", { clip, to: at(frame), ...(track ? { track } : {}), ...(mode === "reorder" ? { reorder: true } : {}) }),
       trim: (clip, side, frames) => frames !== 0 && mutate("edit.trim", { clip, [side]: delta(frames) }),
       setSpeed: (clip, speed) => mutate("edit.set_speed", { clip, speed, ripple: true }),
       setVolume: (clip, db) => mutate("edit.set_volume", { clip, db }),

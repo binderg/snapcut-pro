@@ -6,7 +6,7 @@
 
 export type Payload =
   | { kind: "asset"; id: string }
-  | { kind: "transition"; transition: string; duration?: string };
+  | { kind: "transition"; transition: string; duration?: string; prepare?: () => Promise<boolean> };
 
 export interface DropTarget {
   el: () => HTMLElement | null;
