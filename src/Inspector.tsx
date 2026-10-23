@@ -1,11 +1,14 @@
 import { useEffect, useState } from "react";
 import type { Actions } from "./Editor";
-import { Clip, fileName, Project, timecode } from "./model";
+import type { Engine } from "./engine";
+import { Clip, fileName, Project, timecode, Transition } from "./model";
+import { TransitionPanel } from "./TransitionPanel";
 
 type Tab = "basic" | "audio" | "speed";
 
-export function Inspector({ project, clip, actions, projectPath }: { project: Project; clip: Clip | null; actions: Actions; projectPath: string | null }) {
+export function Inspector({ project, engine, clip, transition, actions, projectPath }: { project: Project; engine: Engine; clip: Clip | null; transition: Transition | null; actions: Actions; projectPath: string | null }) {
   const [tab, setTab] = useState<Tab>("basic");
+  if (transition) return <TransitionPanel key={transition.id} project={project} engine={engine} tr={transition} actions={actions} />;
   if (!clip) return <ProjectInfo project={project} projectPath={projectPath} />;
   const tabs: { id: Tab; label: string }[] = [
     { id: "basic", label: clip.kind === "video" ? "Video" : "Clip" },

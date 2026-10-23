@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Rpc } from "./rpc";
 import { useEngine } from "./engine";
-import { at, Clip, delta, findClip, linkedIds, Project } from "./model";
+import { Align, alignOf, at, Clip, Cut, delta, findClip, findTransition, fitTransition, linkedIds, Project, Transition } from "./model";
 import { onFileDrop } from "./host";
 import { Icon } from "./icons";
 import { LeftPanel } from "./LeftPanel";
@@ -31,11 +31,26 @@ export interface Actions {
   setSpeed: (clip: string, speed: string) => void;
   setVolume: (clip: string, db: number) => void;
   importPaths: (paths: string[]) => void;
+  /** Put a transition on a cut (or swap the kind of the one already there). */
+  addTransition: (kind: string, cut: Cut, duration?: string) => void;
+  setTransition: (id: string, patch: { duration?: number; align?: Align; transition?: string; params?: Record<string, unknown> }) => void;
+  removeTransition: (id: string) => void;
+  moveTransition: (tr: Transition, to: Cut) => void;
 }
+
+/** Frames for a duration typed in the transitions panel (`0.5s`, `f12`, `12f`); 0.5 s if unreadable. */
+function framesOf(d: string | undefined, fps: number): number {
+  const s = (d ?? "").trim();
+  let m = /^f(\d+)$/.exec(s) ?? /^(\d+)f$/.exec(s);
+  if (m) return Number(m[1]);
+  m = /^(\d*\.?\d+)s?$/.exec(s);
+  return Math.round((m ? Number(m[1]) : 0.5) * fps);
+}
+
 
 export function Editor({ rpc, projectPath, onClose }: { rpc: Rpc; projectPath: string | null; onClose: () => void }) {
   const engine = useEngine(rpc);
-  const { project, mutate } = engine;
+  const { project, mutate, group } = engine;
   const [playhead, setPlayhead] = useState(0);
   const [selected, setSelected] = useState<string | null>(null);
   const [playing, setPlaying] = useState(false);
@@ -52,7 +67,7 @@ export function Editor({ rpc, projectPath, onClose }: { rpc: Rpc; projectPath: s
   useEffect(() => {
     if (!project) return;
     if (playhead > project.duration) setPlayhead(project.duration);
-    if (selected && !findClip(project, selected)) setSelected(null);
+    if (selected && !findClip(project, selected) && !findTransition(project, selected)) setSelected(null);
   }, [project]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Tell the user when someone else edits.
@@ -66,6 +81,7 @@ export function Editor({ rpc, projectPath, onClose }: { rpc: Rpc; projectPath: s
   }, [engine.lastChange]);
 
   const selectedClip = findClip(project, selected);
+  const selectedTransition = findTransition(project, selected);
 
   /** The clip that playhead tools act on: the selection if it spans the playhead, else the top clip there. */
   const targetClip = useCallback((): Clip | null => {
@@ -113,8 +129,16 @@ export function Editor({ rpc, projectPath, onClose }: { rpc: Rpc; projectPath: s
         if (!p || !c) return;
         mutate("edit.ripple_delete", { ranges: [{ from: at(playheadRef.current), to: at(c.end) }], tracks: tracksOf(p, c) });
       },
-      rippleDelete: () => selected && mutate("edit.ripple_delete", { clips: [selected] }),
-      lift: () => selected && mutate("edit.delete", { clips: [selected] }),
+      rippleDelete: () => {
+        if (!selected) return;
+        if (findTransition(projRef.current, selected)) mutate("transition.remove", { id: selected });
+        else mutate("edit.ripple_delete", { clips: [selected] });
+      },
+      lift: () => {
+        if (!selected) return;
+        if (findTransition(projRef.current, selected)) mutate("transition.remove", { id: selected });
+        else mutate("edit.delete", { clips: [selected] });
+      },
       deleteClip: (clip, ripple) => mutate(ripple ? "edit.ripple_delete" : "edit.delete", { clips: [clip] }),
       unlink: (clip) => mutate("edit.unlink", { clip }),
       undo: () => mutate("history.undo"),
@@ -131,8 +155,43 @@ export function Editor({ rpc, projectPath, onClose }: { rpc: Rpc; projectPath: s
       setSpeed: (clip, speed) => mutate("edit.set_speed", { clip, speed, ripple: true }),
       setVolume: (clip, db) => mutate("edit.set_volume", { clip, db }),
       importPaths: (paths) => paths.length > 0 && mutate("media.import", { paths }, `Importing ${paths.length} file${paths.length > 1 ? "s" : ""}…`),
+      addTransition: async (kind, cut, duration) => {
+        const p = projRef.current;
+        if (!p) return;
+        if (cut.transition) {
+          // Dropping on a cut that has one swaps its kind and keeps its length.
+          await mutate("transition.set", { id: cut.transition.id, transition: kind });
+          setSelected(cut.transition.id);
+          return;
+        }
+        const fit = fitTransition(p, cut, framesOf(duration, p.fps));
+        const r: any = await mutate("transition.add", { clip: cut.outgoing.id, transition: kind, duration: `f${fit.duration}`, align: fit.align });
+        if (r?.id) setSelected(r.id);
+      },
+      setTransition: (id, patch) => {
+        const { duration, ...rest } = patch;
+        mutate("transition.set", { id, ...rest, ...(duration != null ? { duration: `f${Math.max(1, Math.round(duration))}` } : {}) });
+      },
+      removeTransition: (id) => mutate("transition.remove", { id }),
+      moveTransition: async (tr, to) => {
+        const p = projRef.current;
+        if (!p || (to.track.id === tr.trackId && to.frame === tr.cut)) return;
+        const fit = fitTransition(p, to, tr.inOffset + tr.outOffset, alignOf(tr));
+        let id: string | null = null;
+        await group("Move transition", async () => {
+          if (to.transition) {
+            const r = await mutate("transition.set", { id: to.transition.id, transition: tr.kind, params: tr.params, duration: `f${fit.duration}`, align: fit.align });
+            id = r ? to.transition.id : null;
+          } else {
+            const r: any = await mutate("transition.add", { clip: to.outgoing.id, transition: tr.kind, params: tr.params, duration: `f${fit.duration}`, align: fit.align });
+            id = r?.id ?? null;
+          }
+          if (id) await mutate("transition.remove", { id: tr.id });
+        });
+        if (id) setSelected(id);
+      },
     }),
-    [mutate, targetClip, selected],
+    [mutate, group, targetClip, selected],
   );
 
   // Files dropped from the OS (desktop app only).
@@ -229,7 +288,7 @@ export function Editor({ rpc, projectPath, onClose }: { rpc: Rpc; projectPath: s
           seek={actions.seek}
         />
         <div className="vsplitter" onPointerDown={startResizeCol("rightW")} onDoubleClick={() => { setRightW(340); save("rightW", 340); }} title="Drag to resize, double-click to reset" />
-        <Inspector project={project} clip={selectedClip} actions={actions} projectPath={projectPath} />
+        <Inspector project={project} engine={engine} clip={selectedClip} transition={selectedTransition} actions={actions} projectPath={projectPath} />
       </div>
 
       <div className="splitter" onPointerDown={startResize} onDoubleClick={() => { setTimelineH(340); save("timelineH", 340); }} title="Drag to resize, double-click to reset" />

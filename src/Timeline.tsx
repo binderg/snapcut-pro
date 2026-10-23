@@ -1,11 +1,17 @@
 // Canvas timeline. Drawing is cheap, so every change redraws everything.
 // Edits are only sent on pointer-up: a drag is a local preview, then one
-// edit.move / edit.trim call, and the engine's answer replaces the preview.
+// edit.move / edit.trim / transition.set call, and the engine's answer
+// replaces the preview.
+//
+// Transitions sit on the cut between two video clips, drawn below the clip
+// header so the clips' own trim edges stay reachable there. Drag a
+// transition's edge to change its length, its body to move it to another
+// cut, or drop one from the Transitions panel onto a cut.
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { Engine } from "./engine";
 import type { Actions } from "./Editor";
-import { Clip, linkedIds, Project, shortTime, Track } from "./model";
+import { alignOf, Clip, Cut, cutsOf, findClip, linkedIds, maxTransition, offsetsFor, Project, shortTime, Track, Transition, TRANSITION_MIME } from "./model";
 import { Icon } from "./icons";
 import { markerColor } from "./LeftPanel";
 import { ContextMenu, MenuItem } from "./ContextMenu";
@@ -17,6 +23,12 @@ const LANE_GAP = 6;
 const EDGE_PX = 7;
 const SNAP_PX = 8;
 const CELL_W = 112;
+/** Header strip of a clip; transitions are drawn below it. */
+const HEAD_H = 16;
+/** Narrowest a transition is drawn, so a short one stays clickable when zoomed out. */
+const TR_MIN_W = 18;
+/** How close (px) a dragged transition must come to a cut to land on it. */
+const CUT_PX = 28;
 
 interface Sheet {
   img: HTMLImageElement;
@@ -51,7 +63,9 @@ type Drag =
       mode: "push" | "reorder";
       shift: Map<string, number>;
     }
-  | { kind: "trim"; clip: Clip; side: "in" | "out"; x0: number; dx: number };
+  | { kind: "trim"; clip: Clip; side: "in" | "out"; x0: number; dx: number }
+  | { kind: "trtrim"; tr: Transition; side: "in" | "out"; x0: number; duration: number }
+  | { kind: "trmove"; tr: Transition; x0: number; y0: number; x: number; y: number; moved: boolean; target: Cut | null };
 
 const C = {
   bg: "#141417",
@@ -69,6 +83,8 @@ const C = {
   playhead: "#ffffff",
   snap: "#facc15",
   drop: "#1ccfd9",
+  tr: "rgba(230, 251, 252, 0.22)",
+  trLine: "rgba(230, 251, 252, 0.7)",
 };
 
 export function Timeline(props: { project: Project; engine: Engine; playhead: number; selected: string | null; actions: Actions; playing: boolean }) {
@@ -82,8 +98,9 @@ export function Timeline(props: { project: Project; engine: Engine; playhead: nu
   // After a drop, keep drawing the new position until the engine's answer (a new revision) arrives,
   // so the clip does not snap back to where it was for a moment.
   const [settle, setSettle] = useState<{ rev: number; d: Drag } | null>(null);
-  const [menu, setMenu] = useState<{ x: number; y: number; clip: Clip } | null>(null);
+  const [menu, setMenu] = useState<{ x: number; y: number; items: (MenuItem | "sep")[] } | null>(null);
   const [dropAt, setDropAt] = useState<{ frame: number; lane: Lane | null } | null>(null);
+  const [trDrop, setTrDrop] = useState<Cut | null>(null);
   const [snapAt, setSnapAt] = useState<number | null>(null);
   const [hoverCursor, setHoverCursor] = useState("default");
   const [sheet, setSheet] = useState<Sheet | null>(null);
@@ -178,6 +195,44 @@ export function Timeline(props: { project: Project; engine: Engine; playhead: nu
     }
     return null;
   };
+
+  /** Where a transition is drawn: its range around the cut, at least TR_MIN_W wide. */
+  const trBox = (lane: Lane, cut: number, inOffset: number, outOffset: number) => {
+    let x1 = xOf(cut - inOffset), x2 = xOf(cut + outOffset);
+    if (x2 - x1 < TR_MIN_W) {
+      const mid = xOf(cut) + ((outOffset - inOffset) / 2) * ppf;
+      x1 = mid - TR_MIN_W / 2;
+      x2 = mid + TR_MIN_W / 2;
+    }
+    return { x1, x2, y: lane.y + HEAD_H + 2, h: lane.h - HEAD_H - 6 };
+  };
+
+  const hitTransition = (x: number, y: number): { tr: Transition; edge: "in" | "out" | null } | null => {
+    const lane = laneAt(y);
+    if (!lane || lane.track.kind !== "video") return null;
+    for (const tr of lane.track.transitions) {
+      const b = trBox(lane, tr.cut, tr.inOffset, tr.outOffset);
+      if (x < b.x1 - 3 || x > b.x2 + 3 || y < b.y || y > b.y + b.h) continue;
+      const edgeW = Math.min(EDGE_PX, (b.x2 - b.x1) / 4);
+      const edge = x - b.x1 < edgeW ? "in" : b.x2 - x < edgeW ? "out" : null;
+      return { tr, edge };
+    }
+    return null;
+  };
+
+  /** The cut nearest the pointer on the video lane under it, if close enough. */
+  const cutNear = (x: number, y: number): Cut | null => {
+    const lane = laneAt(y);
+    if (!lane || lane.track.kind !== "video") return null;
+    let best: Cut | null = null, bestD = CUT_PX;
+    for (const c of cutsOf(lane.track)) {
+      const d = Math.abs(xOf(c.frame) - x);
+      if (d <= bestD) { best = c; bestD = d; }
+    }
+    return best;
+  };
+
+  const laneOfTrack = (id: string) => lanes.find((l) => l.track.id === id) ?? null;
 
   const snapPoints = useCallback(
     (exclude: Set<string>) => {
@@ -288,6 +343,48 @@ export function Timeline(props: { project: Project; engine: Engine; playhead: nu
       }
     }
 
+    // Transitions on their cuts.
+    for (const l of lanes) {
+      for (const tr of l.track.transitions) {
+        let inO = tr.inOffset, outO = tr.outOffset, lane = l, ghost = false;
+        if (d?.kind === "trtrim" && d.tr.id === tr.id) [inO, outO] = offsetsFor(d.duration, alignOf(tr));
+        if (drag?.kind === "trmove" && drag.tr.id === tr.id && drag.moved) ghost = true;
+        const b = trBox(lane, tr.cut, inO, outO);
+        if (b.x2 < 0 || b.x1 > size.w) continue;
+        drawTransition(g, b, { selected: tr.id === selected, ghost, label: d?.kind === "trtrim" && d.tr.id === tr.id ? `${(d.duration / fps).toFixed(1)}s` : null });
+      }
+    }
+
+    // A transition being moved follows the pointer; its landing cut lights up.
+    if (drag?.kind === "trmove" && drag.moved) {
+      const target = drag.target;
+      if (target) {
+        const lane = laneOfTrack(target.track.id);
+        if (lane) {
+          const fit = Math.min(drag.tr.inOffset + drag.tr.outOffset, Math.max(1, maxTransition(project, target, alignOf(drag.tr))));
+          const [i, o] = offsetsFor(fit, alignOf(drag.tr));
+          drawDropCut(g, trBox(lane, target.frame, i, o));
+        }
+      }
+      const lane = laneOfTrack(drag.tr.trackId);
+      if (lane) {
+        const b = trBox(lane, drag.tr.cut, drag.tr.inOffset, drag.tr.outOffset);
+        const w = b.x2 - b.x1;
+        drawTransition(g, { x1: drag.x - w / 2, x2: drag.x + w / 2, y: drag.y - b.h / 2, h: b.h }, { selected: true, ghost: false, label: null });
+      }
+    }
+
+    // A transition dragged in from the panel: highlight the cut it would land on.
+    if (trDrop) {
+      const lane = laneOfTrack(trDrop.track.id);
+      if (lane) {
+        const b = trDrop.transition
+          ? trBox(lane, trDrop.frame, trDrop.transition.inOffset, trDrop.transition.outOffset)
+          : trBox(lane, trDrop.frame, Math.round(fps / 4), Math.round(fps / 4));
+        drawDropCut(g, b);
+      }
+    }
+
     // Point markers on the ruler.
     for (const m of project.markers) {
       const x = xOf(m.start);
@@ -384,6 +481,13 @@ export function Timeline(props: { project: Project; engine: Engine; playhead: nu
       actions.seek(frameOf(x));
       return;
     }
+    const ht = hitTransition(x, y);
+    if (ht) {
+      actions.select(ht.tr.id);
+      if (ht.edge) setDrag({ kind: "trtrim", tr: ht.tr, side: ht.edge, x0: x, duration: ht.tr.inOffset + ht.tr.outOffset });
+      else setDrag({ kind: "trmove", tr: ht.tr, x0: x, y0: y, x, y, moved: false, target: null });
+      return;
+    }
     const h = hit(x, y);
     if (!h) {
       actions.select(null);
@@ -399,10 +503,16 @@ export function Timeline(props: { project: Project; engine: Engine; playhead: nu
   const onContextMenu = (e: React.MouseEvent) => {
     e.preventDefault();
     const { x, y } = local(e);
+    const ht = y < RULER_H ? null : hitTransition(x, y);
+    if (ht) {
+      actions.select(ht.tr.id);
+      setMenu({ x: e.clientX, y: e.clientY, items: [{ label: "Remove transition", hint: "Del", danger: true, run: () => actions.removeTransition(ht.tr.id) }] });
+      return;
+    }
     const h = y < RULER_H ? null : hit(x, y);
     if (!h) { setMenu(null); return; }
     actions.select(h.clip.id);
-    setMenu({ x: e.clientX, y: e.clientY, clip: h.clip });
+    setMenu({ x: e.clientX, y: e.clientY, items: menuItems(h.clip) });
   };
 
   const menuItems = (c: Clip): (MenuItem | "sep")[] => [
@@ -424,6 +534,8 @@ export function Timeline(props: { project: Project; engine: Engine; playhead: nu
     const { x, y } = local(e);
     if (!drag) {
       if (y < RULER_H) return setHoverCursor("pointer");
+      const ht = hitTransition(x, y);
+      if (ht) return setHoverCursor(ht.edge ? "ew-resize" : "grab");
       const h = hit(x, y);
       setHoverCursor(h ? (h.edge ? "ew-resize" : "grab") : "default");
       return;
@@ -564,6 +676,24 @@ export function Timeline(props: { project: Project; engine: Engine; playhead: nu
       const next = { ...drag, dx };
       setDrag(next);
       return next;
+    } else if (drag.kind === "trtrim") {
+      // Center-aligned transitions grow on both sides, so an edge moves half the length change.
+      const align = alignOf(drag.tr);
+      const raw = Math.round((x - drag.x0) / ppf) * (drag.side === "out" ? 1 : -1) * (align === "center" ? 2 : 1);
+      const orig = drag.tr.inOffset + drag.tr.outOffset;
+      const a = findClip(project, drag.tr.outgoing), b = findClip(project, drag.tr.incoming);
+      const max = a && b ? Math.max(orig, maxTransition(project, { outgoing: a, incoming: b }, align)) : Infinity;
+      const duration = Math.max(align === "center" ? 2 : 1, Math.min(max, orig + raw));
+      const next = { ...drag, duration };
+      setDrag(next);
+      return next;
+    } else if (drag.kind === "trmove") {
+      const moved = drag.moved || Math.abs(x - drag.x0) > 4 || Math.abs(y - drag.y0) > 6;
+      const target = moved ? cutNear(x, y) : null;
+      const next = { ...drag, x, y, moved, target: target && !(target.track.id === drag.tr.trackId && target.frame === drag.tr.cut) ? target : null };
+      setDrag(next);
+      setHoverCursor(moved ? "grabbing" : "grab");
+      return next;
     }
     return drag;
   };
@@ -591,6 +721,11 @@ export function Timeline(props: { project: Project; engine: Engine; playhead: nu
     } else if (d.kind === "trim" && d.dx !== 0) {
       setSettle({ rev: project.revision, d });
       actions.trim(d.clip.id, d.side, d.dx);
+    } else if (d.kind === "trtrim" && d.duration !== d.tr.inOffset + d.tr.outOffset) {
+      setSettle({ rev: project.revision, d });
+      actions.setTransition(d.tr.id, { duration: d.duration });
+    } else if (d.kind === "trmove" && d.moved && d.target) {
+      actions.moveTransition(d.tr, d.target);
     }
   };
 
@@ -642,6 +777,14 @@ export function Timeline(props: { project: Project; engine: Engine; playhead: nu
 
   const onDragOver = (e: React.DragEvent) => {
     const types = e.dataTransfer.types;
+    if (types.includes(TRANSITION_MIME)) {
+      e.preventDefault();
+      const { x, y } = local(e);
+      const cut = cutNear(x, y);
+      e.dataTransfer.dropEffect = cut ? "copy" : "none";
+      setTrDrop((prev) => (prev?.track.id === cut?.track.id && prev?.frame === cut?.frame ? prev : cut));
+      return;
+    }
     if (!types.includes("application/x-ve-asset")) return;
     e.preventDefault();
     e.dataTransfer.dropEffect = "copy";
@@ -649,6 +792,20 @@ export function Timeline(props: { project: Project; engine: Engine; playhead: nu
     setDropAt(dropTarget(x, y, types.includes("application/x-ve-asset-audio") ? "audio" : "video"));
   };
   const onDrop = (e: React.DragEvent) => {
+    const trData = e.dataTransfer.getData(TRANSITION_MIME);
+    if (trData) {
+      e.preventDefault();
+      const cut = trDrop;
+      setTrDrop(null);
+      if (!cut) return;
+      try {
+        const { transition, duration } = JSON.parse(trData) as { transition: string; duration?: string };
+        actions.addTransition(transition, cut, duration);
+      } catch {
+        // not ours
+      }
+      return;
+    }
     const id = e.dataTransfer.getData("application/x-ve-asset");
     setDropAt(null);
     if (!id) return;
@@ -712,14 +869,14 @@ export function Timeline(props: { project: Project; engine: Engine; playhead: nu
             onPointerCancel={onPointerUp}
             onWheel={onWheel}
             onDragOver={onDragOver}
-            onDragLeave={() => setDropAt(null)}
+            onDragLeave={() => { setDropAt(null); setTrDrop(null); }}
             onDrop={onDrop}
             onDoubleClick={(e) => {
               const { x, y } = local(e);
               if (!hit(x, y) && y > RULER_H) fit();
             }}
           />
-          {menu && <ContextMenu x={menu.x} y={menu.y} items={menuItems(menu.clip)} onClose={() => setMenu(null)} />}
+          {menu && <ContextMenu x={menu.x} y={menu.y} items={menu.items} onClose={() => setMenu(null)} />}
           {project.duration === 0 && (
             <div style={{ position: "absolute", left: 24, top: RULER_H + 24, color: "var(--faint)", pointerEvents: "none" }}>
               Drag media here to start
@@ -819,6 +976,75 @@ function drawClip(
       g.fillRect(x1 + w - 4, y + h / 2 - 8, 3, 16);
     }
   }
+}
+
+type Box = { x1: number; x2: number; y: number; h: number };
+
+/** A transition: a translucent block over the cut with a bow-tie mark, like CapCut's. */
+function drawTransition(g: CanvasRenderingContext2D, b: Box, o: { selected: boolean; ghost: boolean; label: string | null }) {
+  const w = b.x2 - b.x1;
+  g.save();
+  g.globalAlpha = o.ghost ? 0.35 : 1;
+  g.fillStyle = "rgba(10, 30, 34, 0.55)";
+  g.beginPath();
+  g.roundRect(b.x1, b.y, w, b.h, 4);
+  g.fill();
+  g.fillStyle = C.tr;
+  g.fill();
+  g.strokeStyle = o.selected ? C.sel : C.trLine;
+  g.lineWidth = o.selected ? 2 : 1;
+  g.beginPath();
+  g.roundRect(b.x1 + 0.5, b.y + 0.5, w - 1, b.h - 1, 4);
+  g.stroke();
+  // Bow tie in the middle.
+  const cx = (b.x1 + b.x2) / 2, cy = b.y + b.h / 2, r = Math.min(6, w / 3, b.h / 3);
+  if (r >= 3) {
+    g.fillStyle = C.clipText;
+    g.beginPath();
+    g.moveTo(cx - r, cy - r);
+    g.lineTo(cx, cy);
+    g.lineTo(cx - r, cy + r);
+    g.closePath();
+    g.moveTo(cx + r, cy - r);
+    g.lineTo(cx, cy);
+    g.lineTo(cx + r, cy + r);
+    g.closePath();
+    g.fill();
+  }
+  if (o.selected && w > 14) {
+    // Length handles.
+    g.fillStyle = C.sel;
+    g.fillRect(b.x1 + 1, cy - 7, 3, 14);
+    g.fillRect(b.x2 - 4, cy - 7, 3, 14);
+  }
+  g.restore();
+  if (o.label) {
+    g.save();
+    g.font = "11px 'Segoe UI', system-ui, sans-serif";
+    const tw = g.measureText(o.label).width + 10;
+    const lx = (b.x1 + b.x2) / 2 - tw / 2, ly = b.y - 20;
+    g.fillStyle = "rgba(0,0,0,0.8)";
+    g.beginPath();
+    g.roundRect(lx, ly, tw, 16, 3);
+    g.fill();
+    g.fillStyle = C.clipText;
+    g.textBaseline = "middle";
+    g.fillText(o.label, lx + 5, ly + 8.5);
+    g.restore();
+  }
+}
+
+/** Where a dragged transition would land. */
+function drawDropCut(g: CanvasRenderingContext2D, b: Box) {
+  g.save();
+  g.fillStyle = "rgba(28, 207, 217, 0.25)";
+  g.strokeStyle = C.drop;
+  g.lineWidth = 2;
+  g.beginPath();
+  g.roundRect(b.x1, b.y, b.x2 - b.x1, b.h, 4);
+  g.fill();
+  g.stroke();
+  g.restore();
 }
 
 function fitText(g: CanvasRenderingContext2D, s: string, w: number) {

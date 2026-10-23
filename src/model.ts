@@ -35,7 +35,43 @@ export interface Track {
   name: string;
   kind: "video" | "audio";
   clips: Clip[];
+  transitions: Transition[];
   end: number;
+}
+
+/** An OTIO Transition on a cut: it reaches `inOffset` frames before the cut and `outOffset` after. */
+export interface Transition {
+  id: string;
+  /** Engine reference, e.g. `core.transition/wipe@1`. */
+  kind: string;
+  params: Record<string, unknown>;
+  trackId: string;
+  trackName: string;
+  cut: number;
+  inOffset: number;
+  outOffset: number;
+  start: number;
+  end: number;
+  outgoing: string;
+  incoming: string;
+}
+
+/** Drag data type for a transition card dragged from the panel onto a cut. */
+export const TRANSITION_MIME = "application/x-ve-transition";
+
+export type Align = "center" | "start" | "end";
+
+/** The alignment the engine infers from the offsets (same rule as `transition.set`). */
+export const alignOf = (t: { inOffset: number; outOffset: number }): Align =>
+  t.inOffset === 0 ? "start" : t.outOffset === 0 ? "end" : "center";
+
+/** `(inOffset, outOffset)` for a duration, split like the engine does (center: the shorter half before the cut). */
+export function offsetsFor(duration: number, align: Align): [number, number] {
+  const d = Math.max(1, Math.round(duration));
+  if (align === "start") return [0, d];
+  if (align === "end") return [d, 0];
+  const half = Math.floor(d / 2);
+  return [half, d - half];
 }
 
 export interface Marker {
@@ -93,11 +129,32 @@ export function parseProject(doc: { revision: number; timeline: any }): Project 
     if (t.OTIO_SCHEMA?.startsWith("Track") !== true) continue;
     const kind = t.kind === "Audio" ? "audio" : "video";
     const id = t.metadata?.ve?.track?.id ?? t.name;
-    const track: Track = { id, name: t.name, kind, clips: [], end: 0 };
+    const track: Track = { id, name: t.name, kind, clips: [], transitions: [], end: 0 };
     let pos = 0; // seconds; rounded per item so long timelines don't drift
     for (const item of t.children ?? []) {
       const schema: string = item.OTIO_SCHEMA ?? "";
-      if (schema.startsWith("Transition")) continue; // takes no time in OTIO
+      if (schema.startsWith("Transition")) {
+        // Takes no time in OTIO; it sits between the outgoing and incoming clip.
+        const m = item.metadata?.ve?.transition ?? {};
+        const cut = toFrames(pos);
+        const inOffset = toFrames(secs(item.in_offset));
+        const outOffset = toFrames(secs(item.out_offset));
+        track.transitions.push({
+          id: m.id ?? `${id}:tr${track.transitions.length}`,
+          kind: m.transition ?? "core.transition/dissolve@1",
+          params: m.params ?? {},
+          trackId: id,
+          trackName: t.name,
+          cut,
+          inOffset,
+          outOffset,
+          start: cut - inOffset,
+          end: cut + outOffset,
+          outgoing: track.clips[track.clips.length - 1]?.id ?? "",
+          incoming: "",
+        });
+        continue;
+      }
       const dur = secs(item.source_range?.duration);
       if (schema.startsWith("Clip")) {
         const m = item.metadata?.ve?.clip ?? {};
@@ -120,6 +177,7 @@ export function parseProject(doc: { revision: number; timeline: any }): Project 
       pos += dur;
     }
     track.end = toFrames(pos);
+    for (const tr of track.transitions) tr.incoming = track.clips.find((c) => c.start === tr.cut)?.id ?? "";
     tracks.push(track);
   }
 
@@ -175,6 +233,63 @@ export function allClips(p: Project): Clip[] {
 export function findClip(p: Project | null, id: string | null): Clip | null {
   if (!p || !id) return null;
   return allClips(p).find((c) => c.id === id) ?? null;
+}
+
+export function findTransition(p: Project | null, id: string | null): Transition | null {
+  if (!p || !id) return null;
+  for (const t of p.tracks) for (const tr of t.transitions) if (tr.id === id) return tr;
+  return null;
+}
+
+/** A cut between two touching clips on a video track, where a transition can go. */
+export interface Cut {
+  track: Track;
+  frame: number;
+  outgoing: Clip;
+  incoming: Clip;
+  transition: Transition | null;
+}
+
+export function cutsOf(track: Track): Cut[] {
+  if (track.kind !== "video") return [];
+  const out: Cut[] = [];
+  const cs = [...track.clips].sort((a, b) => a.start - b.start);
+  for (let i = 0; i + 1 < cs.length; i++) {
+    if (cs[i].end !== cs[i + 1].start) continue;
+    const frame = cs[i].end;
+    out.push({ track, frame, outgoing: cs[i], incoming: cs[i + 1], transition: track.transitions.find((t) => t.cut === frame) ?? null });
+  }
+  return out;
+}
+
+/**
+ * Longest transition (frames) the clips around a cut allow for an alignment: the part before
+ * the cut needs incoming media before its in point, the part after needs outgoing media past
+ * its out point, and neither may be longer than its clip. The engine checks again exactly.
+ */
+export function maxTransition(p: Project, cut: { outgoing: Clip; incoming: Clip }, align: Align): number {
+  const a = cut.outgoing, b = cut.incoming;
+  const speed = (c: Clip) => c.speed[0] / c.speed[1] || 1;
+  const asset = p.assets.find((x) => x.url === a.url);
+  const aDur = a.end - a.start, bDur = b.end - b.start;
+  const post = asset && asset.frames > 0 ? Math.floor((asset.frames - (a.sourceIn + aDur * speed(a))) / speed(a)) : Infinity;
+  const pre = Math.floor(b.sourceIn / speed(b));
+  const before = Math.max(0, Math.min(aDur, pre)); // inOffset limit
+  const after = Math.max(0, Math.min(bDur, post)); // outOffset limit
+  if (align === "start") return after;
+  if (align === "end") return before;
+  return Math.max(0, Math.min(2 * before + 1, 2 * after));
+}
+
+/** Fit a wanted length onto a cut: center if the handles allow, else start or end at the cut. */
+export function fitTransition(p: Project, cut: Cut, frames: number, prefer: Align = "center"): { duration: number; align: Align } {
+  const order: Align[] = [prefer, ...(["center", "start", "end"] as Align[]).filter((a) => a !== prefer)];
+  for (const align of order) {
+    const max = maxTransition(p, cut, align);
+    if (max >= (align === "center" ? 2 : 1)) return { duration: Math.max(1, Math.min(frames, max)), align };
+  }
+  // Nothing fits; send it anyway and let the engine explain.
+  return { duration: Math.max(1, frames), align: prefer };
 }
 
 /** Clips that move with `clip` (same `link`), including itself. */
