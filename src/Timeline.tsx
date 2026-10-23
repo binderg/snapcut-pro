@@ -322,6 +322,19 @@ export function Timeline(props: { project: Project; engine: Engine; playhead: nu
       }
     }
 
+    // Render bar under the ruler: which frames the engine has cached for the preview.
+    const cache = engine.cache;
+    if (cache && cache.revision === project.revision && project.duration > 0) {
+      const y = RULER_H - 3;
+      g.fillStyle = "rgba(250, 204, 21, 0.35)";
+      g.fillRect(Math.max(0, xOf(0)), y, Math.min(size.w, xOf(project.duration)) - Math.max(0, xOf(0)), 3);
+      g.fillStyle = "#22c55e";
+      for (const [a, b] of cache.cached) {
+        const x1 = Math.max(0, xOf(a)), x2 = Math.min(size.w, xOf(b));
+        if (x2 > x1) g.fillRect(x1, y, Math.max(1, x2 - x1), 3);
+      }
+    }
+
     // Everything on the lanes scrolls under the ruler.
     g.save();
     g.beginPath();

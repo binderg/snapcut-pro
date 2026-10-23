@@ -8,6 +8,8 @@ import type { Engine } from "./engine";
 import { at, Project, timecode } from "./model";
 import { cacheFileUrl, isTauri } from "./host";
 import { Icon } from "./icons";
+import { Handles } from "./Handles";
+import type { Actions } from "./Editor";
 
 const CHUNK_SECS = 8;
 
@@ -24,8 +26,10 @@ export function Player(props: {
   playing: boolean;
   setPlaying: (p: boolean | ((x: boolean) => boolean)) => void;
   seek: (f: number) => void;
+  selected: string | null;
+  actions: Actions;
 }) {
-  const { project, engine, playhead, playing, setPlaying, seek } = props;
+  const { project, engine, playhead, playing, setPlaying, seek, selected, actions } = props;
   const stageRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const [box, setBox] = useState({ w: 640, h: 360 });
@@ -92,6 +96,19 @@ export function Player(props: {
     }, playing ? 0 : 40);
     return () => clearTimeout(t);
   }, [playhead, project.revision, renderWidth, empty, videoOn]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Tell the engine where we are, so it renders ahead into its frame cache
+  // (frames an edit just changed first). Older engines without it: ignore.
+  const hinted = useRef(true);
+  useEffect(() => {
+    if (empty || !hinted.current) return;
+    const t = setTimeout(() => {
+      engine.query("ui.cache_hint", { at: at(Math.min(playhead, project.duration - 1)), width: renderWidth, format: "jpeg" }).catch((e) => {
+        if (/method not found/i.test(String(e?.message ?? e))) hinted.current = false;
+      });
+    }, playing ? 1000 : 250);
+    return () => clearTimeout(t);
+  }, [playhead, renderWidth, project.revision, empty]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Playback.
   const renderChunk = async (from: number): Promise<Chunk | null> => {
@@ -189,6 +206,9 @@ export function Player(props: {
         <div className="player-frame" style={{ width: box.w, height: box.h }}>
           {img && !videoOn && <img src={img} alt="" draggable={false} />}
           <video ref={videoRef} style={{ visibility: videoOn ? "visible" : "hidden" }} onTimeUpdate={onTime} onEnded={onEnded} playsInline />
+          {!empty && !videoOn && !playing && (
+            <Handles project={project} playhead={Math.min(playhead, project.duration - 1)} selected={selected} actions={actions} w={box.w} h={box.h} />
+          )}
           {empty && (
             <div className="player-empty">
               <div>

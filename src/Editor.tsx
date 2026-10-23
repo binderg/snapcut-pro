@@ -318,6 +318,8 @@ export function Editor({ rpc, projectPath, onClose }: { rpc: Rpc; projectPath: s
           playing={playing}
           setPlaying={setPlaying}
           seek={actions.seek}
+          selected={selected}
+          actions={actions}
         />
         <div className="vsplitter" onPointerDown={startResizeCol("rightW")} onDoubleClick={() => { setRightW(340); save("rightW", 340); }} title="Drag to resize, double-click to reset" />
         <Inspector project={project} engine={engine} clip={selectedClip} transition={selectedTransition} actions={actions} projectPath={projectPath} />

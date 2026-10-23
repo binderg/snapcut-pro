@@ -13,8 +13,19 @@ export interface HistoryStep {
   group?: string | null;
 }
 
+/** `ui.cache`: which frames the engine has cached at the preview size. */
+export interface CacheStatus {
+  revision: number;
+  width: number;
+  frames: number;
+  cached: [number, number][];
+  pending: number;
+}
+
 export interface Engine {
   project: Project | null;
+  /** Latest render-ahead status from the engine (null until it sends one). */
+  cache: CacheStatus | null;
   history: { undo: HistoryStep[]; redo: HistoryStep[] };
   lastChange: { actor: string; command: string; revision: number } | null;
   busy: string | null;
@@ -34,6 +45,7 @@ export function useEngine(rpc: Rpc): Engine {
   const [lastChange, setLastChange] = useState<Engine["lastChange"]>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [cache, setCache] = useState<CacheStatus | null>(null);
   const rev = useRef(0);
   const fetching = useRef<Promise<void> | null>(null);
   const again = useRef(false);
@@ -63,6 +75,8 @@ export function useEngine(rpc: Rpc): Engine {
       if (method === "project.changed") {
         setLastChange({ actor: actorName(params.actor), command: params.command, revision: params.revision });
         if (params.revision !== rev.current) refetch();
+      } else if (method === "ui.cache") {
+        setCache(params as CacheStatus);
       } else if (method === "project.reloaded" || method === "events.lagged") {
         refetch();
       }
@@ -121,7 +135,7 @@ export function useEngine(rpc: Rpc): Engine {
     [rpc, refetch],
   );
 
-  return { project, history, lastChange, busy, error, clearError: () => setError(null), report: setError, query, mutate, group };
+  return { project, cache, history, lastChange, busy, error, clearError: () => setError(null), report: setError, query, mutate, group };
 }
 
 /** `{kind: "agent", id: "claude"}` -> `agent:claude`; the local user is just `user`. */

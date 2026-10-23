@@ -45,12 +45,14 @@ export interface ClipTransform {
   crop_bottom: number;
   /** Fields animated by keyframes (their value above is the base, used without keys). */
   keyframed: string[];
+  /** Field -> keyframes, times in seconds from the clip's start. */
+  keys: Record<string, { t: number; v: number; ease: string }[]>;
 }
 
-export type TransformField = Exclude<keyof ClipTransform, "keyframed">;
+export type TransformField = Exclude<keyof ClipTransform, "keyframed" | "keys">;
 
 export const DEFAULT_TRANSFORM: ClipTransform = {
-  x: 0, y: 0, scale: 1, rotation: 0, opacity: 1, crop_left: 0, crop_right: 0, crop_top: 0, crop_bottom: 0, keyframed: [],
+  x: 0, y: 0, scale: 1, rotation: 0, opacity: 1, crop_left: 0, crop_right: 0, crop_top: 0, crop_bottom: 0, keyframed: [], keys: {},
 };
 
 function parseTransform(t: any): ClipTransform | null {
@@ -61,7 +63,87 @@ function parseTransform(t: any): ClipTransform | null {
     x: n(t.x, D.x), y: n(t.y, D.y), scale: n(t.scale, D.scale), rotation: n(t.rotation, D.rotation), opacity: n(t.opacity, D.opacity),
     crop_left: n(t.crop_left, 0), crop_right: n(t.crop_right, 0), crop_top: n(t.crop_top, 0), crop_bottom: n(t.crop_bottom, 0),
     keyframed: Object.entries(t.keyframes ?? {}).filter(([, k]) => Array.isArray(k) && k.length > 0).map(([f]) => f),
+    keys: Object.fromEntries(
+      Object.entries(t.keyframes ?? {})
+        .filter(([, k]) => Array.isArray(k) && k.length > 0)
+        .map(([f, k]) => [f, (k as any[]).map((x) => ({ t: secs(x.t), v: Number(x.v), ease: x.ease ?? "linear" })).sort((a, b) => a.t - b.t)]),
+    ),
   };
+}
+
+/** The transform at `local` seconds into the clip, keyframes evaluated like the engine (linear or hold). */
+export function transformAt(t: ClipTransform, local: number): ClipTransform {
+  const out = { ...t };
+  for (const [field, keys] of Object.entries(t.keys)) {
+    if (!keys.length) continue;
+    let v = keys[keys.length - 1].v;
+    if (local <= keys[0].t) v = keys[0].v;
+    else {
+      for (let i = 0; i + 1 < keys.length; i++) {
+        const a = keys[i], b = keys[i + 1];
+        if (local < b.t) {
+          v = a.ease === "hold" || b.t <= a.t ? a.v : a.v + ((b.v - a.v) * (local - a.t)) / (b.t - a.t);
+          break;
+        }
+      }
+    }
+    (out as any)[field] = v;
+  }
+  return out;
+}
+
+/** `av_rescale` rounding, as the engine's fit uses. */
+const rescale = (a: number, b: number, c: number) => Math.floor((a * b * 2 + c) / (2 * c));
+
+/**
+ * Where a video clip's picture is on the canvas at the playhead, in canvas pixels, matching the
+ * engine (`ve-render::compose::layout`): fitted and centered with even sizes, then scaled around
+ * its center, moved by canvas fractions, cropped and turned. `null` if its size is unknown.
+ */
+export interface Placement {
+  /** Center of the whole (uncropped) picture. */
+  cx: number;
+  cy: number;
+  /** Whole picture size. */
+  w: number;
+  h: number;
+  /** Fitted size before scale (what scale 1 means). */
+  baseW: number;
+  baseH: number;
+  /** Degrees, clockwise. */
+  rotation: number;
+  t: ClipTransform;
+}
+
+export function placement(p: Project, c: Clip, frame: number): Placement | null {
+  const a = p.assets.find((x) => x.url === c.url)?.video;
+  if (!a) return null;
+  const turned = Math.abs(a.rotation ?? 0) % 180 === 90;
+  const [sw0, sh0] = turned ? [a.height, a.width] : [a.width, a.height];
+  const cw = p.width, ch = p.height;
+  const sw = Math.max(2, Math.floor(Math.min(rescale(ch, sw0, sh0), cw) / 2) * 2);
+  const sh = Math.max(2, Math.floor(Math.min(rescale(cw, sh0, sw0), ch) / 2) * 2);
+  const x = Math.floor((cw - sw) / 2) & ~1, y = Math.floor((ch - sh) / 2) & ~1;
+  const t = transformAt(c.transform ?? DEFAULT_TRANSFORM, (frame - c.start) / p.fps);
+  return { cx: x + sw / 2 + t.x * cw, cy: y + sh / 2 + t.y * ch, w: sw * t.scale, h: sh * t.scale, baseW: sw, baseH: sh, rotation: t.rotation, t };
+}
+
+/** The four visible corners (crop applied) of a placement: top left, top right, bottom right, bottom left. */
+export function corners(pl: Placement): [number, number][] {
+  const { t } = pl;
+  const x0 = -pl.w / 2 + t.crop_left * pl.w, x1 = pl.w / 2 - t.crop_right * pl.w;
+  const y0 = -pl.h / 2 + t.crop_top * pl.h, y1 = pl.h / 2 - t.crop_bottom * pl.h;
+  const r = (pl.rotation * Math.PI) / 180, cos = Math.cos(r), sin = Math.sin(r);
+  return ([[x0, y0], [x1, y0], [x1, y1], [x0, y1]] as [number, number][]).map(([x, y]) => [pl.cx + x * cos - y * sin, pl.cy + x * sin + y * cos]);
+}
+
+/** Whether canvas point (px, py) is on the visible picture. */
+export function hitsPlacement(pl: Placement, px: number, py: number): boolean {
+  const r = (-pl.rotation * Math.PI) / 180;
+  const dx = px - pl.cx, dy = py - pl.cy;
+  const x = dx * Math.cos(r) - dy * Math.sin(r), y = dx * Math.sin(r) + dy * Math.cos(r);
+  const { t } = pl;
+  return x >= -pl.w / 2 + t.crop_left * pl.w && x <= pl.w / 2 - t.crop_right * pl.w && y >= -pl.h / 2 + t.crop_top * pl.h && y <= pl.h / 2 - t.crop_bottom * pl.h;
 }
 
 export interface Track {

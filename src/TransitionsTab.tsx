@@ -108,7 +108,7 @@ export function TransitionsTab({ engine, project, actions, playhead, selected }:
         <input className="input" placeholder="Search transitions" value={q} onChange={(e) => setQ(e.target.value)} />
         <input className="input mono" style={{ width: 70 }} title="Duration" value={duration} onChange={(e) => setDuration(e.target.value)} />
       </div>
-      <p className="note" style={{ margin: 0 }}>{hint} Move the mouse over a card to scrub the transition.</p>
+      <p className="note" style={{ margin: 0 }}>{hint} Hover a card to play it.</p>
       {problem && <div className="err">{problem}</div>}
       {shownBuiltin.length > 0 && <div className="section-title">Built in</div>}
       <div className="tr-grid">{shownBuiltin.map((i) => <Card key={i.key} item={i} duration={duration} onApply={() => apply(i)} prepare={() => ensure(i)} />)}</div>
@@ -129,7 +129,7 @@ function Card({ item, duration, onApply, prepare }: { item: Item; duration: stri
   const [p, setP] = useState<number | null>(null);
   const [broken, setBroken] = useState(false);
 
-  // Resting picture is the outgoing image; hovering draws the shader at the mouse position.
+  // Resting picture is the outgoing image; hovering plays the shader.
   useEffect(() => {
     const ctx = ref.current?.getContext("2d");
     if (!ctx) return;
@@ -143,10 +143,22 @@ function Card({ item, duration, onApply, prepare }: { item: Item; duration: stri
     else setBroken(true);
   }, [p, broken, item.preview]);
 
-  const move = (e: React.MouseEvent) => {
-    const r = e.currentTarget.getBoundingClientRect();
-    setP(Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)));
-  };
+  // Hovering plays the transition on a loop: a beat on the first picture,
+  // the transition, a beat on the second, again.
+  const [hover, setHover] = useState(false);
+  useEffect(() => {
+    if (!hover) { setP(null); return; }
+    const HOLD_A = 250, PLAY = 1100, HOLD_B = 450, LOOP = HOLD_A + PLAY + HOLD_B;
+    const t0 = performance.now();
+    let raf = 0;
+    const tick = (now: number) => {
+      const t = (now - t0) % LOOP;
+      setP(t < HOLD_A ? 0 : t < HOLD_A + PLAY ? (t - HOLD_A) / PLAY : 1);
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [hover]);
   const usable = !!item.engineId;
 
   return (
@@ -157,14 +169,13 @@ function Card({ item, duration, onApply, prepare }: { item: Item; duration: stri
         e.preventDefault();
         beginDrag(e, { kind: "transition", transition: item.engineId, duration, prepare }, item.name);
       }}
-      onMouseMove={move}
-      onMouseLeave={() => setP(null)}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
       onClick={() => !wasDrag() && onApply()}
       title={`${item.name}${item.detail ? `\n${item.detail}` : ""}${usable ? "\nDrag onto a cut, or click to add it to the nearest cut" : `\nPreview only: ${item.gl?.engine_error?.split("\n")[0] ?? "not in the engine yet"}`}`}
     >
       <div className="tr-thumb">
         <canvas ref={ref} width={W} height={H} />
-        {p !== null && <div className="tr-sweep" style={{ left: `${p * 100}%` }} />}
         {!usable && <span className="badge">Preview</span>}
         {broken && <span className="tr-broken">No preview</span>}
       </div>
