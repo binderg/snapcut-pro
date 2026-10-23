@@ -28,6 +28,40 @@ export interface Clip {
   speed: Rational;
   volumeDb: number;
   url?: string;
+  /** Placement on the canvas (video clips); `null` is the default: fitted, centered, opaque. */
+  transform: ClipTransform | null;
+}
+
+/** `metadata.ve.clip.transform`; see the engine's `edit.set_transform`. */
+export interface ClipTransform {
+  x: number;
+  y: number;
+  scale: number;
+  rotation: number;
+  opacity: number;
+  crop_left: number;
+  crop_right: number;
+  crop_top: number;
+  crop_bottom: number;
+  /** Fields animated by keyframes (their value above is the base, used without keys). */
+  keyframed: string[];
+}
+
+export type TransformField = Exclude<keyof ClipTransform, "keyframed">;
+
+export const DEFAULT_TRANSFORM: ClipTransform = {
+  x: 0, y: 0, scale: 1, rotation: 0, opacity: 1, crop_left: 0, crop_right: 0, crop_top: 0, crop_bottom: 0, keyframed: [],
+};
+
+function parseTransform(t: any): ClipTransform | null {
+  if (!t || typeof t !== "object") return null;
+  const n = (v: unknown, d: number) => (typeof v === "number" && Number.isFinite(v) ? v : d);
+  const D = DEFAULT_TRANSFORM;
+  return {
+    x: n(t.x, D.x), y: n(t.y, D.y), scale: n(t.scale, D.scale), rotation: n(t.rotation, D.rotation), opacity: n(t.opacity, D.opacity),
+    crop_left: n(t.crop_left, 0), crop_right: n(t.crop_right, 0), crop_top: n(t.crop_top, 0), crop_bottom: n(t.crop_bottom, 0),
+    keyframed: Object.entries(t.keyframes ?? {}).filter(([, k]) => Array.isArray(k) && k.length > 0).map(([f]) => f),
+  };
 }
 
 export interface Track {
@@ -37,6 +71,8 @@ export interface Track {
   clips: Clip[];
   transitions: Transition[];
   end: number;
+  /** False when hidden (video) or muted (audio): renders skip it. */
+  enabled: boolean;
 }
 
 /** An OTIO Transition on a cut: it reaches `inOffset` frames before the cut and `outOffset` after. */
@@ -126,7 +162,7 @@ export function parseProject(doc: { revision: number; timeline: any }): Project 
     if (t.OTIO_SCHEMA?.startsWith("Track") !== true) continue;
     const kind = t.kind === "Audio" ? "audio" : "video";
     const id = t.metadata?.ve?.track?.id ?? t.name;
-    const track: Track = { id, name: t.name, kind, clips: [], transitions: [], end: 0 };
+    const track: Track = { id, name: t.name, kind, clips: [], transitions: [], end: 0, enabled: t.enabled !== false };
     let pos = 0; // seconds; rounded per item so long timelines don't drift
     for (const item of t.children ?? []) {
       const schema: string = item.OTIO_SCHEMA ?? "";
@@ -169,6 +205,7 @@ export function parseProject(doc: { revision: number; timeline: any }): Project 
           speed: m.speed ?? [1, 1],
           volumeDb: m.volume_db ?? 0,
           url: ref?.target_url,
+          transform: kind === "video" ? parseTransform(m.transform) : null,
         });
       }
       pos += dur;

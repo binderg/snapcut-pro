@@ -30,6 +30,10 @@ const HEAD_H = 16;
 const TR_MIN_W = 18;
 /** How close (px) a dragged transition must come to a cut to land on it. */
 const CUT_PX = 28;
+/** Empty band above the top video track: drop a video clip here for a new track on top. */
+const TOP_PAD = 30;
+/** Room kept below the bottom audio track for the same, with audio. */
+const BOTTOM_PAD = 48;
 
 interface Sheet {
   img: HTMLImageElement;
@@ -63,6 +67,8 @@ type Drag =
       dest: number;
       mode: "push" | "reorder";
       shift: Map<string, number>;
+      /** Over the empty band above (video) or below (audio) the tracks: goes on a new track. */
+      newTrack: boolean;
     }
   | { kind: "trim"; clip: Clip; side: "in" | "out"; x0: number; dx: number }
   | { kind: "trtrim"; tr: Transition; side: "in" | "out"; x0: number; duration: number }
@@ -95,12 +101,14 @@ export function Timeline(props: { project: Project; engine: Engine; playhead: nu
   const [size, setSize] = useState({ w: 0, h: 0 });
   const [ppf, setPpf] = useState(2); // pixels per frame
   const [scroll, setScroll] = useState(0); // px
+  const [vscroll, setVscroll] = useState(0); // px, lanes only (the ruler stays put)
+  const [editing, setEditing] = useState<string | null>(null); // track being renamed
   const [drag, setDrag] = useState<Drag | null>(null);
   // After a drop, keep drawing the new position until the engine's answer (a new revision) arrives,
   // so the clip does not snap back to where it was for a moment.
   const [settle, setSettle] = useState<{ rev: number; d: Drag } | null>(null);
   const [menu, setMenu] = useState<{ x: number; y: number; items: (MenuItem | "sep")[] } | null>(null);
-  const [dropAt, setDropAt] = useState<{ frame: number; lane: Lane | null } | null>(null);
+  const [dropAt, setDropAt] = useState<{ frame: number; lane: Lane | null; newTrack: "video" | "audio" | null } | null>(null);
   const [trDrop, setTrDrop] = useState<Cut | null>(null);
   const [snapAt, setSnapAt] = useState<number | null>(null);
   const [hoverCursor, setHoverCursor] = useState("default");
@@ -111,14 +119,37 @@ export function Timeline(props: { project: Project; engine: Engine; playhead: nu
   const lanes: Lane[] = useMemo(() => {
     const vids = project.tracks.filter((t) => t.kind === "video").reverse();
     const auds = project.tracks.filter((t) => t.kind === "audio");
-    let y = RULER_H + 10;
+    let y = RULER_H + TOP_PAD - vscroll;
     return [...vids, ...auds].map((track) => {
       const h = track.kind === "video" ? VIDEO_H : AUDIO_H;
       const lane = { track, y, h };
       y += h + LANE_GAP;
       return lane;
     });
-  }, [project]);
+  }, [project, vscroll]);
+
+  const lanesH = TOP_PAD + project.tracks.reduce((n, t) => n + (t.kind === "video" ? VIDEO_H : AUDIO_H) + LANE_GAP, 0) + BOTTOM_PAD;
+  const maxV = Math.max(0, RULER_H + lanesH - size.h);
+  const clampV = useCallback((v: number) => Math.max(0, Math.min(v, maxV)), [maxV]);
+  useEffect(() => setVscroll((v) => clampV(v)), [clampV]);
+
+  /** Where a new track would be drawn: the band above the top lane (video) or below the bottom one (audio). */
+  const newLaneBox = (kind: "video" | "audio") => {
+    const first = lanes[0], last = lanes[lanes.length - 1];
+    if (kind === "video") {
+      const bottom = first ? first.y - LANE_GAP : RULER_H + TOP_PAD;
+      return { y: Math.max(RULER_H + 2, bottom - VIDEO_H), h: Math.min(VIDEO_H, bottom - RULER_H - 2), bottom };
+    }
+    const top = last ? last.y + last.h + LANE_GAP : RULER_H + TOP_PAD;
+    return { y: top, h: AUDIO_H, bottom: top + AUDIO_H };
+  };
+  /** True if `y` is over the band where a clip of `kind` would go on a new track. */
+  const inNewZone = (y: number, kind: "video" | "audio") => {
+    if (y < RULER_H) return false;
+    const first = lanes[0], last = lanes[lanes.length - 1];
+    if (kind === "video") return y < (first ? first.y - LANE_GAP / 2 : Infinity);
+    return y > (last ? last.y + last.h + LANE_GAP / 2 : -Infinity);
+  };
 
   // Size.
   useLayoutEffect(() => {
@@ -180,7 +211,7 @@ export function Timeline(props: { project: Project; engine: Engine; playhead: nu
 
   const xOf = (f: number) => f * ppf - scroll;
   const frameOf = (x: number) => Math.max(0, Math.round((x + scroll) / ppf));
-  const laneAt = (y: number) => lanes.find((l) => y >= l.y - LANE_GAP / 2 && y < l.y + l.h + LANE_GAP / 2) ?? null;
+  const laneAt = (y: number) => y < RULER_H ? null : lanes.find((l) => y >= l.y - LANE_GAP / 2 && y < l.y + l.h + LANE_GAP / 2) ?? null;
 
   const hit = (x: number, y: number): { clip: Clip; edge: "in" | "out" | null } | null => {
     const lane = laneAt(y);
@@ -291,6 +322,12 @@ export function Timeline(props: { project: Project; engine: Engine; playhead: nu
       }
     }
 
+    // Everything on the lanes scrolls under the ruler.
+    g.save();
+    g.beginPath();
+    g.rect(0, RULER_H, size.w, size.h - RULER_H);
+    g.clip();
+
     // Lanes.
     for (const l of lanes) {
       g.fillStyle = C.laneBg;
@@ -322,7 +359,8 @@ export function Timeline(props: { project: Project; engine: Engine; playhead: nu
           offset = d.dx;
           start += offset;
           end += offset;
-          if (c.id === d.clip.id && d.lane && d.lane.track.kind === l.track.kind) { y = d.lane.y; h = d.lane.h; }
+          if (c.id === d.clip.id && d.newTrack) { const b = newLaneBox(c.kind); y = b.y; h = b.h; }
+          else if (c.id === d.clip.id && d.lane && d.lane.track.kind === l.track.kind) { y = d.lane.y; h = d.lane.h; }
         } else if (d?.kind === "move" && d.shift.has(c.id)) {
           offset = d.shift.get(c.id)!;
           start += offset;
@@ -337,6 +375,7 @@ export function Timeline(props: { project: Project; engine: Engine; playhead: nu
           selected: c.id === selected,
           linked: selIds.has(c.id) && c.id !== selected,
           ghost: !!(drag?.kind === "move" && dragIds!.has(c.id) && drag.moved),
+          dim: !l.track.enabled,
           sheet: c.kind === "video" && sheet ? sheet : null,
           frameAtX: (x: number) => (x + scroll) / ppf - offset,
           fps,
@@ -386,6 +425,24 @@ export function Timeline(props: { project: Project; engine: Engine; playhead: nu
       }
     }
 
+    // The new track a drop would make.
+    const newKind = d?.kind === "move" && d.newTrack && drag ? d.clip.kind : dropAt?.newTrack ?? null;
+    if (newKind) {
+      const b = newLaneBox(newKind);
+      g.fillStyle = hexA(C.drop, 0.08);
+      g.strokeStyle = C.drop;
+      g.setLineDash([4, 4]);
+      g.beginPath();
+      g.roundRect(0.5, b.y + 0.5, size.w - 1, b.h - 1, 4);
+      g.fill();
+      g.stroke();
+      g.setLineDash([]);
+      g.fillStyle = C.drop;
+      g.fillText(`New ${newKind} track`, size.w - 120, b.y + 10);
+    }
+
+    g.restore();
+
     // Point markers on the ruler.
     for (const m of project.markers) {
       const x = xOf(m.start);
@@ -410,7 +467,7 @@ export function Timeline(props: { project: Project; engine: Engine; playhead: nu
       g.moveTo(x, RULER_H);
       g.lineTo(x, size.h);
       g.stroke();
-      if (dropAt.lane) {
+      if (dropAt.lane && !dropAt.newTrack) {
         // Solid on the track the clip goes to.
         g.strokeStyle = C.drop;
         g.lineWidth = 3;
@@ -422,7 +479,7 @@ export function Timeline(props: { project: Project; engine: Engine; playhead: nu
       g.lineWidth = 1;
     }
 
-    if (d?.kind === "move" && d.moved && drag) {
+    if (d?.kind === "move" && d.moved && drag && !d.newTrack) {
       const lane = d.lane && d.lane.track.kind === d.clip.kind ? d.lane : lanes.find((l) => l.track.id === d.clip.trackId);
       if (lane) {
         const x = Math.round(xOf(d.dest)) + 0.5;
@@ -498,7 +555,7 @@ export function Timeline(props: { project: Project; engine: Engine; playhead: nu
     }
     actions.select(h.clip.id);
     if (h.edge) setDrag({ kind: "trim", clip: h.clip, side: h.edge, x0: x, dx: 0 });
-    else setDrag({ kind: "move", clip: h.clip, ids: linkedIds(project, h.clip), x0: x, y0: y, dx: 0, lane: laneAt(y), moved: false, dest: h.clip.start, mode: "push", shift: new Map() });
+    else setDrag({ kind: "move", clip: h.clip, ids: linkedIds(project, h.clip), x0: x, y0: y, dx: 0, lane: laneAt(y), moved: false, dest: h.clip.start, mode: "push", shift: new Map(), newTrack: false });
   };
 
   const onContextMenu = (e: React.MouseEvent) => {
@@ -522,6 +579,32 @@ export function Timeline(props: { project: Project; engine: Engine; playhead: nu
     "sep",
     { label: "Unlink", hint: linkedIds(project, c).size > 1 ? undefined : "not linked", disabled: linkedIds(project, c).size < 2, run: () => actions.unlink(c.id) },
   ];
+
+  /**
+   * Header menu. For video, up means a higher layer (a higher index); audio tracks are listed by
+   * index, so up there means a lower one.
+   */
+  const trackMenu = (t: Track): (MenuItem | "sep")[] => {
+    const same = project.tracks.filter((x) => x.kind === t.kind);
+    const i = same.findIndex((x) => x.id === t.id);
+    const video = t.kind === "video";
+    const up = video ? i + 1 : i - 1, down = video ? i - 1 : i + 1;
+    const n = t.clips.length;
+    const label = video ? "video" : "audio";
+    return [
+      { label: "Rename", run: () => setEditing(t.id) },
+      { label: video ? (t.enabled ? "Hide track" : "Show track") : (t.enabled ? "Mute track" : "Unmute track"), run: () => actions.setTrackEnabled(t.id, !t.enabled) },
+      { label: "Move up", hint: video ? "layer above" : undefined, disabled: up < 0 || up >= same.length, run: () => actions.moveTrack(t.id, up) },
+      { label: "Move down", hint: video ? "layer below" : undefined, disabled: down < 0 || down >= same.length, run: () => actions.moveTrack(t.id, down) },
+      "sep",
+      { label: `Add ${label} track above`, run: () => actions.addTrack(t.kind, video ? i + 1 : i) },
+      { label: `Add ${label} track below`, run: () => actions.addTrack(t.kind, video ? i : i + 1) },
+      "sep",
+      n > 0
+        ? { label: `Delete track and its ${n} clip${n > 1 ? "s" : ""}`, danger: true, run: () => actions.removeTrack(t.id, true) }
+        : { label: "Delete track", danger: true, run: () => actions.removeTrack(t.id, false) },
+    ];
+  };
 
   // Pointer moves arrive faster than frames; each one used to re-render and redraw the whole canvas.
   // Keep only the latest point per animation frame.
@@ -660,9 +743,15 @@ export function Timeline(props: { project: Project; engine: Engine; playhead: nu
       else if (p2 != null) { dx = s2 - drag.clip.end; sp = p2; }
       dx = Math.max(dx, -drag.clip.start);
       setSnapAt(moved ? sp : null);
+      if (moved && inNewZone(y, drag.clip.kind)) {
+        const next = { ...drag, dx, moved, lane: null, dest: drag.clip.start + dx, mode: "push" as const, shift: new Map<string, number>(), newTrack: true };
+        setDrag(next);
+        setHoverCursor("grabbing");
+        return next;
+      }
       const lane = laneAt(y) ?? drag.lane;
       const { dest, mode, shift } = landing(drag, dx, lane);
-      const next = { ...drag, dx, moved, lane, dest, mode, shift };
+      const next = { ...drag, dx, moved, lane, dest, mode, shift, newTrack: false };
       setDrag(next);
       setHoverCursor("grabbing");
       return next;
@@ -712,7 +801,9 @@ export function Timeline(props: { project: Project; engine: Engine; playhead: nu
     setDrag(null);
     setSnapAt(null);
     if (!d) return;
-    if (d.kind === "move" && d.moved) {
+    if (d.kind === "move" && d.moved && d.newTrack) {
+      actions.moveToNewTrack(d.clip.id, d.dest, d.clip.kind);
+    } else if (d.kind === "move" && d.moved) {
       const track = d.lane && d.lane.track.kind === d.clip.kind && d.lane.track.id !== d.clip.trackId ? d.lane.track.name : undefined;
       if (d.dest !== d.clip.start || track) {
         // Until the engine answers, draw the clip where it lands, not where it was let go.
@@ -746,6 +837,9 @@ export function Timeline(props: { project: Project; engine: Engine; playhead: nu
       const next = Math.max(0.02, Math.min(40, ppf * (e.deltaY < 0 ? 1.15 : 1 / 1.15)));
       setPpf(next);
       setScroll(Math.max(0, f * next - x));
+    } else if (e.shiftKey) {
+      // Shift+wheel scrolls the tracks (some systems turn it into deltaX).
+      setVscroll((v) => clampV(v + (e.deltaY || e.deltaX)));
     } else {
       setScroll((s) => clampScroll(s + (Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY)));
     }
@@ -768,12 +862,13 @@ export function Timeline(props: { project: Project; engine: Engine; playhead: nu
    * The engine pushes later clips on that track, and their linked partners, to make room.
    */
   const dropTarget = (x: number, y: number, kind: "video" | "audio") => {
+    if (inNewZone(y, kind)) return { frame: snap(frameOf(x), snapPoints(new Set()))[0], lane: null, newTrack: kind };
     const lane = laneAt(y);
     const track = lane && lane.track.kind === kind ? lane.track : project.tracks.find((t) => t.kind === kind) ?? null;
     const raw = frameOf(x);
     const over = track?.clips.find((c) => c.start < raw && raw < c.end);
     const frame = over ? (raw - over.start < (over.end - over.start) / 2 ? over.start : over.end) : snap(raw, snapPoints(new Set()))[0];
-    return { frame, lane: track ? lanes.find((l) => l.track.id === track.id) ?? null : null };
+    return { frame, lane: track ? lanes.find((l) => l.track.id === track.id) ?? null : null, newTrack: null };
   };
   const assetKind = (id: string) => (project.assets.find((a) => a.id === id)?.video ? "video" : "audio");
 
@@ -798,7 +893,8 @@ export function Timeline(props: { project: Project; engine: Engine; playhead: nu
     setDropAt(null);
     const { x, y } = local({ clientX: cx, clientY: cy });
     const d = dropTarget(x, y, assetKind(pl.id));
-    actions.insert(pl.id, d.frame, d.lane?.track.name);
+    if (d.newTrack) actions.insertOnNewTrack(pl.id, d.frame, d.newTrack);
+    else actions.insert(pl.id, d.frame, d.lane?.track.name);
   };
   const dropFns = useRef({ dropOver, dropLeave, dropHere });
   dropFns.current = { dropOver, dropLeave, dropHere };
@@ -847,13 +943,66 @@ export function Timeline(props: { project: Project; engine: Engine; playhead: nu
         </div>
       </div>
       <div className="tl-body">
-        <div className="tl-heads" style={{ paddingTop: RULER_H + 10 }}>
+        <div className="tl-heads" onWheel={(e) => setVscroll((v) => clampV(v + e.deltaY))}>
           {lanes.map((l) => (
-            <div key={l.track.id} className="tl-head" style={{ height: l.h, marginBottom: LANE_GAP }}>
-              <span className="nm">{l.track.name}</span>
-              <span style={{ width: 16, height: 16, display: "grid", placeItems: "center" }}>{l.track.kind === "video" ? <Icon.video /> : <Icon.audio />}</span>
+            <div
+              key={l.track.id}
+              className={`tl-head ${l.track.enabled ? "" : "off"}`}
+              style={{ top: l.y, height: l.h }}
+              onContextMenu={(e) => { e.preventDefault(); setMenu({ x: e.clientX, y: e.clientY, items: trackMenu(l.track) }); }}
+            >
+              <span style={{ width: 16, height: 16, flex: "none", display: "grid", placeItems: "center" }}>{l.track.kind === "video" ? <Icon.video /> : <Icon.audio />}</span>
+              {editing === l.track.id ? (
+                <input
+                  className="nm-edit"
+                  autoFocus
+                  defaultValue={l.track.name}
+                  onFocus={(e) => e.target.select()}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+                    else if (e.key === "Escape") setEditing(null);
+                    e.stopPropagation();
+                  }}
+                  onBlur={(e) => {
+                    const name = e.target.value.trim();
+                    setEditing(null);
+                    if (name && name !== l.track.name) actions.renameTrack(l.track.id, name);
+                  }}
+                />
+              ) : (
+                <span className="nm" title={`${l.track.name} (double-click to rename)`} onDoubleClick={() => setEditing(l.track.id)}>{l.track.name}</span>
+              )}
+              <button
+                className={`icon-btn tl-head-toggle ${l.track.enabled ? "" : "off"}`}
+                title={l.track.kind === "video" ? (l.track.enabled ? "Hide track" : "Show track") : (l.track.enabled ? "Mute track" : "Unmute track")}
+                onClick={() => actions.setTrackEnabled(l.track.id, !l.track.enabled)}
+              >
+                {l.track.kind === "video" ? (l.track.enabled ? <Icon.eye /> : <Icon.eyeOff />) : (l.track.enabled ? <Icon.speaker /> : <Icon.speakerOff />)}
+              </button>
+              <button
+                className="icon-btn tl-head-menu"
+                title="Track options"
+                onClick={(e) => { const r = e.currentTarget.getBoundingClientRect(); setMenu({ x: r.left, y: r.bottom + 2, items: trackMenu(l.track) }); }}
+              >
+                <Icon.more />
+              </button>
             </div>
           ))}
+          <div className="tl-heads-top" style={{ height: RULER_H }}>
+            <button
+              className="icon-btn"
+              title="Add track"
+              onClick={(e) => {
+                const r = e.currentTarget.getBoundingClientRect();
+                setMenu({ x: r.left, y: r.bottom + 2, items: [
+                  { label: "Add video track", hint: "on top", run: () => actions.addTrack("video") },
+                  { label: "Add audio track", hint: "at the bottom", run: () => actions.addTrack("audio") },
+                ] });
+              }}
+            >
+              <Icon.plus />
+            </button>
+          </div>
         </div>
         <div className="tl-canvas-wrap" ref={wrapRef}>
           <canvas
@@ -909,6 +1058,8 @@ function drawClip(
     selected: boolean;
     linked: boolean;
     ghost: boolean;
+    /** On a hidden or muted track. */
+    dim: boolean;
     sheet: Sheet | null;
     frameAtX: (x: number) => number;
     fps: number;
@@ -917,7 +1068,7 @@ function drawClip(
   const w = Math.max(1, x2 - x1 - 1);
   const video = c.kind === "video";
   g.save();
-  g.globalAlpha = o.ghost ? 0.75 : 1;
+  g.globalAlpha = (o.ghost ? 0.75 : 1) * (o.dim ? 0.35 : 1);
   g.beginPath();
   g.roundRect(x1, y, w, h, 4);
   g.clip();

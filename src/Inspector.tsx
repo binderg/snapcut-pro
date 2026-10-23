@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 import type { Actions } from "./Editor";
 import type { Engine } from "./engine";
-import { Clip, fileName, Project, timecode, Transition } from "./model";
+import { Clip, ClipTransform, DEFAULT_TRANSFORM, fileName, Project, timecode, TransformField, Transition } from "./model";
+import { Icon } from "./icons";
 import { TransitionPanel } from "./TransitionPanel";
 
 type Tab = "basic" | "audio" | "speed";
@@ -23,6 +24,7 @@ export function Inspector({ project, engine, clip, transition, actions, projectP
         ))}
       </div>
       <div className="single stack">
+        {tab === "basic" && clip.kind === "video" && <TransformPanel project={project} clip={clip} actions={actions} />}
         {tab === "basic" && <Basic project={project} clip={clip} />}
         {tab === "audio" && <Audio project={project} clip={clip} actions={actions} />}
         {tab === "speed" && <Speed project={project} clip={clip} actions={actions} />}
@@ -49,8 +51,124 @@ function Basic({ project, clip }: { project: Project; clip: Clip }) {
         <span className="k">Linked</span><span className="v">{linked.length ? linked.map((c) => `${c.trackName} ${c.id}`).join(", ") : "none"}</span>
         {clip.url && (<><span className="k">File</span><span className="v" title={clip.url}>{fileName(clip.url)}</span></>)}
       </div>
-      <p className="note">Transform, crop and effects arrive with the Phase 2 compositor; the engine can't express them yet.</p>
     </>
+  );
+}
+
+/**
+ * One slider per transform field. Values show in the units people think in
+ * (percent, degrees) and go to the engine raw. A change is sent when the
+ * slider is let go (or Enter / leaving the box), so a drag is one undo step.
+ */
+interface FieldSpec {
+  field: TransformField;
+  label: string;
+  min: number;
+  max: number;
+  step: number;
+  /** Engine value -> shown value, and back. */
+  show: (v: number) => number;
+  read: (v: number) => number;
+  unit: string;
+}
+
+const pct = (v: number) => Math.round(v * 1000) / 10;
+const fromPct = (v: number) => v / 100;
+const same = (v: number) => Math.round(v * 10) / 10;
+
+const POSITION: FieldSpec[] = [
+  { field: "x", label: "X", min: -100, max: 100, step: 0.5, show: pct, read: fromPct, unit: "%" },
+  { field: "y", label: "Y", min: -100, max: 100, step: 0.5, show: pct, read: fromPct, unit: "%" },
+  { field: "scale", label: "Scale", min: 5, max: 400, step: 1, show: pct, read: fromPct, unit: "%" },
+  { field: "rotation", label: "Rotation", min: -180, max: 180, step: 1, show: same, read: (v) => v, unit: "°" },
+  { field: "opacity", label: "Opacity", min: 0, max: 100, step: 1, show: pct, read: fromPct, unit: "%" },
+];
+const CROP: FieldSpec[] = [
+  { field: "crop_left", label: "Left", min: 0, max: 90, step: 0.5, show: pct, read: fromPct, unit: "%" },
+  { field: "crop_right", label: "Right", min: 0, max: 90, step: 0.5, show: pct, read: fromPct, unit: "%" },
+  { field: "crop_top", label: "Top", min: 0, max: 90, step: 0.5, show: pct, read: fromPct, unit: "%" },
+  { field: "crop_bottom", label: "Bottom", min: 0, max: 90, step: 0.5, show: pct, read: fromPct, unit: "%" },
+];
+
+/** Quick placements: name, values. */
+const PRESETS: [string, Partial<Record<TransformField, number>>][] = [
+  ["Full", { x: 0, y: 0, scale: 1, rotation: 0 }],
+  ["PiP ↘", { x: 0.3, y: 0.3, scale: 0.35, rotation: 0 }],
+  ["PiP ↗", { x: 0.3, y: -0.3, scale: 0.35, rotation: 0 }],
+  ["PiP ↙", { x: -0.3, y: 0.3, scale: 0.35, rotation: 0 }],
+  ["PiP ↖", { x: -0.3, y: -0.3, scale: 0.35, rotation: 0 }],
+  ["Left half", { x: -0.25, y: 0, scale: 0.5, rotation: 0 }],
+  ["Right half", { x: 0.25, y: 0, scale: 0.5, rotation: 0 }],
+];
+
+function TransformPanel({ project, clip, actions }: { project: Project; clip: Clip; actions: Actions }) {
+  const t: ClipTransform = clip.transform ?? DEFAULT_TRANSFORM;
+  const set = (field: TransformField, v: number | null) => actions.setTransform(clip.id, { [field]: v });
+  const changed = clip.transform != null;
+  const below = project.tracks.filter((x) => x.kind === "video").findIndex((x) => x.id === clip.trackId) > 0;
+  return (
+    <>
+      <div className="section-title" style={{ display: "flex", alignItems: "center" }}>
+        <span style={{ flex: 1 }}>Transform</span>
+        <button className="btn ghost" style={{ height: 24, padding: "0 8px" }} disabled={!changed} onClick={() => actions.setTransform(clip.id, {}, true)}>Reset all</button>
+      </div>
+      <div className="seg">
+        {PRESETS.map(([name, v]) => (
+          <button key={name} className={Object.entries(v).every(([k, x]) => t[k as TransformField] === x) ? "on" : ""} onClick={() => actions.setTransform(clip.id, v)}>{name}</button>
+        ))}
+      </div>
+      <div className="stack" style={{ gap: 6 }}>
+        {POSITION.map((f) => <FieldRow key={`${clip.id}:${f.field}`} spec={f} value={t[f.field]} keyed={t.keyframed.includes(f.field)} set={set} />)}
+      </div>
+      <div className="section-title">Crop</div>
+      <div className="stack" style={{ gap: 6 }}>
+        {CROP.map((f) => <FieldRow key={`${clip.id}:${f.field}`} spec={f} value={t[f.field]} keyed={t.keyframed.includes(f.field)} set={set} />)}
+      </div>
+      {t.keyframed.length > 0 && (
+        <p className="note">Animated by keyframes: {t.keyframed.join(", ")}. The sliders set the value used outside the keyframes; keyframes are set from the CLI (<code>ve transform --key</code>) for now.</p>
+      )}
+      <p className="note">
+        Position moves the picture's center, in percent of the canvas ({project.width}x{project.height}). Scale is relative to the picture fitted to the canvas.
+        {!below && " This is the bottom video track, so nothing shows behind it; put clips on a higher track to layer them."}
+      </p>
+    </>
+  );
+}
+
+function FieldRow({ spec, value, keyed, set }: { spec: FieldSpec; value: number; keyed: boolean; set: (f: TransformField, v: number | null) => void }) {
+  const shown = spec.show(value);
+  const [v, setV] = useState(shown);
+  const [text, setText] = useState(String(shown));
+  useEffect(() => { setV(shown); setText(String(shown)); }, [shown]);
+  const isDefault = value === (DEFAULT_TRANSFORM[spec.field] as number);
+  const commit = (n: number) => {
+    if (!Number.isFinite(n)) { setText(String(shown)); return; }
+    const raw = spec.read(n);
+    if (Math.abs(raw - value) > 1e-9) set(spec.field, raw);
+  };
+  return (
+    <div className="xf-row">
+      <span className={`k ${keyed ? "keyed" : ""}`} title={keyed ? "Animated by keyframes" : undefined}>{spec.label}{keyed ? " ◆" : ""}</span>
+      <input
+        type="range"
+        min={spec.min}
+        max={spec.max}
+        step={spec.step}
+        value={Math.max(spec.min, Math.min(spec.max, v))}
+        onChange={(e) => { const n = Number(e.target.value); setV(n); setText(String(n)); }}
+        onPointerUp={() => commit(v)}
+        onKeyUp={(e) => (e.key.startsWith("Arrow") || e.key === "Home" || e.key === "End") && commit(v)}
+      />
+      <input
+        className="input mono"
+        value={text}
+        title={spec.unit}
+        onChange={(e) => setText(e.target.value)}
+        onBlur={() => commit(parseFloat(text))}
+        onKeyDown={(e) => { if (e.key === "Enter") commit(parseFloat(text)); e.stopPropagation(); }}
+      />
+      <button className="icon-btn" title="Reset" disabled={isDefault} onClick={() => set(spec.field, null)}><Icon.undo /></button>
+    </div>
   );
 }
 

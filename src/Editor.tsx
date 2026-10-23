@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Rpc } from "./rpc";
 import { useEngine } from "./engine";
-import { Align, alignOf, at, Clip, Cut, delta, findClip, findTransition, fitTransition, linkedIds, noRoomMessage, Project, Transition } from "./model";
+import { Align, alignOf, at, Clip, Cut, delta, TransformField, findClip, findTransition, fitTransition, linkedIds, noRoomMessage, Project, Transition } from "./model";
 import { onFileDrop } from "./host";
 import { Icon } from "./icons";
 import { LeftPanel } from "./LeftPanel";
@@ -36,6 +36,20 @@ export interface Actions {
   setTransition: (id: string, patch: { duration?: number; align?: Align; transition?: string; params?: Record<string, unknown> }) => void;
   removeTransition: (id: string) => void;
   moveTransition: (tr: Transition, to: Cut) => void;
+  /** `index` among tracks of the same kind (video: 0 is the bottom layer); default the end (video: the top). */
+  addTrack: (kind: "video" | "audio", index?: number) => void;
+  /** `force` also deletes the track's clips. */
+  removeTrack: (track: string, force: boolean) => void;
+  renameTrack: (track: string, name: string) => void;
+  moveTrack: (track: string, index: number) => void;
+  /** Hide/show a video track, mute/unmute an audio track. */
+  setTrackEnabled: (track: string, enabled: boolean) => void;
+  /** Change transform fields of a video clip (`null` resets one); `reset` starts from the default. */
+  setTransform: (clip: string, values: Partial<Record<TransformField, number | null>>, reset?: boolean) => void;
+  /** Add a track (video: on top; audio: at the bottom) and move the clip onto it, as one undo step. */
+  moveToNewTrack: (clip: string, frame: number, kind: "video" | "audio") => void;
+  /** Add a track and insert the asset on it, as one undo step. `kind` is the asset's main kind (the picture of an A/V asset). */
+  insertOnNewTrack: (asset: string, frame: number, kind: "video" | "audio") => void;
 }
 
 /** Frames for a duration typed in the transitions panel (`0.5s`, `f12`, `12f`); 0.5 s if unreadable. */
@@ -192,6 +206,22 @@ export function Editor({ rpc, projectPath, onClose }: { rpc: Rpc; projectPath: s
         });
         if (id) setSelected(id);
       },
+      addTrack: (kind, index) => mutate("track.add", { kind, ...(index != null ? { index } : {}) }),
+      removeTrack: (track, force) => mutate("track.remove", { track, force }),
+      renameTrack: (track, name) => mutate("track.rename", { track, name }),
+      moveTrack: (track, index) => mutate("track.move", { track, index }),
+      setTrackEnabled: (track, enabled) => mutate("track.set", { track, enabled }),
+      setTransform: (clip, values, reset) => mutate("edit.set_transform", { clip, ...values, ...(reset ? { reset: true } : {}) }),
+      moveToNewTrack: (clip, frame, kind) =>
+        group("Move to new track", async () => {
+          const r: any = await mutate("track.add", { kind });
+          if (r?.track?.id) await mutate("edit.move", { clip, to: at(frame), track: r.track.id });
+        }),
+      insertOnNewTrack: (asset, frame, kind) =>
+        group("Insert on new track", async () => {
+          const r: any = await mutate("track.add", { kind });
+          if (r?.track?.id) await mutate("edit.insert", { asset, at: at(frame), track: r.track.id });
+        }),
     }),
     [mutate, group, report, targetClip, selected],
   );
