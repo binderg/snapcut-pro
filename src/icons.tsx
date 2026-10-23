@@ -22,6 +22,7 @@ export const Icon = {
   zoomIn: I(<><circle cx="11" cy="11" r="6" /><path d="M20 20l-4-4M11 8v6M8 11h6" /></>),
   zoomOut: I(<><circle cx="11" cy="11" r="6" /><path d="M20 20l-4-4M8 11h6" /></>),
   fit: I(<><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" /></>),
+  unfit: I(<><path d="M9 4v5H4M15 4v5h5M9 20v-5H4M15 20v-5h5" /></>),
   play: () => (
     <svg viewBox="0 0 24 24" fill="currentColor"><path d="M7 4.5v15a1 1 0 001.5.86l12-7.5a1 1 0 000-1.72l-12-7.5A1 1 0 007 4.5z" /></svg>
   ),

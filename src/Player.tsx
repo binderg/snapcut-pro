@@ -8,7 +8,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { Engine } from "./engine";
 import { Asset, at, Project, timecode } from "./model";
-import { cacheFileUrl, isTauri, mediaFileUrl } from "./host";
+import { cacheFileUrl, isTauri, mediaFileUrl, setWindowFullscreen } from "./host";
 import { useThumbnail } from "./LeftPanel";
 import { Icon } from "./icons";
 import { Handles } from "./Handles";
@@ -36,6 +36,22 @@ export function Player(props: {
 }) {
   const { project, engine, playhead, playing, setPlaying, seek, selected, actions, source } = props;
   const stageRef = useRef<HTMLDivElement>(null);
+  // Full screen: the player panel fills the screen (in the desktop app the window goes full screen too).
+  const panelRef = useRef<HTMLElement>(null);
+  const [full, setFull] = useState(false);
+  useEffect(() => {
+    const on = () => {
+      const f = !!panelRef.current && document.fullscreenElement === panelRef.current;
+      setFull(f);
+      if (isTauri) setWindowFullscreen(f);
+    };
+    document.addEventListener("fullscreenchange", on);
+    return () => document.removeEventListener("fullscreenchange", on);
+  }, []);
+  const toggleFull = () => {
+    if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+    else panelRef.current?.requestFullscreen().catch(() => {});
+  };
   // Two videos: one shows the current chunk while the other loads the next,
   // so a chunk switch never shows an emptied (black) element.
   const videoA = useRef<HTMLVideoElement>(null);
@@ -294,7 +310,7 @@ export function Player(props: {
   };
 
   return (
-    <section className="panel">
+    <section className="panel" ref={panelRef}>
       <div className="panel-head">{source ? <>Source <span className="faint">· {source.name}</span></> : "Player"}</div>
       <div className="player-stage" ref={stageRef}>
         <div className="player-frame" style={{ width: box.w, height: box.h }}>
@@ -345,6 +361,9 @@ export function Player(props: {
           </div>
           <div className="right muted" style={{ fontSize: 12 }}>
             {source.video ? `${source.video.width}x${source.video.height}` : "audio"}
+            <button className="icon-btn" onClick={toggleFull} data-tip={full ? "Exit full screen (Esc)" : "Full screen"}>
+              {full ? <Icon.unfit /> : <Icon.fit />}
+            </button>
           </div>
         </div>
       ) : (
@@ -359,6 +378,9 @@ export function Player(props: {
         </div>
         <div className="right muted" style={{ fontSize: 12 }}>
           {project.width}x{project.height}
+          <button className="icon-btn" onClick={toggleFull} data-tip={full ? "Exit full screen (Esc)" : "Full screen"}>
+            {full ? <Icon.unfit /> : <Icon.fit />}
+          </button>
         </div>
       </div>
       )}

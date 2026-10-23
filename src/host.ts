@@ -55,6 +55,13 @@ export async function mediaFileUrl(url: string): Promise<string | null> {
   return convertFileSrc(path);
 }
 
+/** Put the app window in or out of full screen (the player's full screen button). */
+export async function setWindowFullscreen(on: boolean): Promise<void> {
+  if (!isTauri) return;
+  const { getCurrentWindow } = await import("@tauri-apps/api/window");
+  await getCurrentWindow().setFullscreen(on).catch(() => {});
+}
+
 /** A URL the webview can load for a file the engine rendered into its cache. */
 export async function cacheFileUrl(path: string): Promise<string | null> {
   if (!isTauri) return null;
