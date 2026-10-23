@@ -1,7 +1,9 @@
-// The viewer. Paused: shows `render.frame` at the playhead (cached per
-// revision, newest request wins, so scrubbing stays responsive). Playing in
-// the desktop app: renders short `render.range_preview` MP4 chunks ahead of
-// the playhead and plays them back to back. In a browser it steps frames.
+// The viewer. Paused: shows `render.frame` at the playhead (newest request
+// wins, so scrubbing stays responsive). Playing in the desktop app: plays
+// `render.range_preview` MP4 chunks back to back. Chunks sit on a fixed grid
+// and use the same width as the paused frames, so the engine can build them
+// from frames it has already rendered ahead, and hands back the same file
+// at once when nothing in a chunk changed. In a browser it steps frames.
 
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { Engine } from "./engine";
@@ -11,7 +13,7 @@ import { Icon } from "./icons";
 import { Handles } from "./Handles";
 import type { Actions } from "./Editor";
 
-const CHUNK_SECS = 8;
+const CHUNK_SECS = 4;
 
 interface Chunk {
   from: number;
@@ -103,27 +105,51 @@ export function Player(props: {
   useEffect(() => {
     if (empty || !hinted.current) return;
     const t = setTimeout(() => {
-      engine.query("ui.cache_hint", { at: at(Math.min(playhead, project.duration - 1)), width: renderWidth, format: "jpeg" }).catch((e) => {
+      // In the desktop app playback uses chunks, which the engine then builds ahead too.
+      const chunk = isTauri ? { chunk_frames: Math.max(1, Math.round(CHUNK_SECS * fps)) } : {};
+      engine.query("ui.cache_hint", { at: at(Math.min(playhead, project.duration - 1)), width: renderWidth, format: "jpeg", ...chunk }).catch((e) => {
         if (/method not found/i.test(String(e?.message ?? e))) hinted.current = false;
       });
     }, playing ? 1000 : 250);
     return () => clearTimeout(t);
   }, [playhead, renderWidth, project.revision, empty]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Playback.
-  const renderChunk = async (from: number): Promise<Chunk | null> => {
-    const to = Math.min(from + Math.round(CHUNK_SECS * fps), project.duration);
-    if (to <= from) return null;
-    const r: any = await engine.query("render.range_preview", { from: at(from), to: at(to), width: Math.min(renderWidth, 960) });
-    const src = await cacheFileUrl(r.path);
-    return src ? { from, to, src } : null;
+  // Playback. The chunk holding `frame`, from its grid start; one request per
+  // chunk at a time, so pausing and playing again waits for the same render.
+  const inflight = useRef(new Map<string, Promise<Chunk | null>>());
+  const startOffset = useRef(0);
+  const chunkLen = Math.max(1, Math.round(CHUNK_SECS * fps));
+  const renderChunk = (frame: number): Promise<Chunk | null> => {
+    const from = Math.floor(frame / chunkLen) * chunkLen;
+    const to = Math.min(from + chunkLen, project.duration);
+    if (to <= from) return Promise.resolve(null);
+    const key = `${project.revision}:${renderWidth}:${from}`;
+    const pending = inflight.current.get(key);
+    if (pending) return pending;
+    const job = (async () => {
+      try {
+        const r: any = await engine.query("render.range_preview", { from: at(from), to: at(to), width: renderWidth });
+        const src = await cacheFileUrl(r.path);
+        return src ? { from, to, src } : null;
+      } finally {
+        inflight.current.delete(key);
+      }
+    })();
+    inflight.current.set(key, job);
+    return job;
   };
 
-  const startChunk = (c: Chunk) => {
+  const startChunk = (c: Chunk, frame = c.from) => {
     chunk.current = c;
-    next.current = null;
+    next.current = c.to < project.duration ? renderChunk(c.to).catch(() => null) : null;
     const v = videoRef.current!;
     v.src = c.src;
+    // Starting mid-chunk: seek once the file is open, and ignore its time until then.
+    startOffset.current = (frame - c.from) / fps;
+    if (frame > c.from) {
+      const seekTo = startOffset.current;
+      v.addEventListener("loadedmetadata", () => { v.currentTime = seekTo; }, { once: true });
+    }
     v.play().catch(() => {});
     setVideoOn(true);
     setBuffering(false);
@@ -133,6 +159,7 @@ export function Player(props: {
     if (!playing) {
       videoRef.current?.pause();
       setVideoOn(false);
+      setBuffering(false);
       chunk.current = null;
       next.current = null;
       return;
@@ -162,7 +189,7 @@ export function Player(props: {
     renderChunk(from).then(
       (c) => {
         if (cancelled) return;
-        if (c) startChunk(c);
+        if (c) startChunk(c, from);
         else setPlaying(false);
       },
       (e) => {
@@ -178,6 +205,8 @@ export function Player(props: {
   const onTime = () => {
     const v = videoRef.current, c = chunk.current;
     if (!v || !c || !playing) return;
+    if (v.seeking || v.currentTime + 0.05 < startOffset.current) return;
+    startOffset.current = 0;
     seek(c.from + Math.floor(v.currentTime * fps));
     const left = v.duration - v.currentTime;
     if (!next.current && c.to < project.duration && left < CHUNK_SECS / 2) {

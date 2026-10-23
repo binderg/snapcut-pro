@@ -740,10 +740,39 @@ export function Timeline(props: { project: Project; engine: Engine; playhead: nu
     return { dest, mode: "push" as const, shift };
   };
 
+  // Dragging the playhead (or scrubbing) near either edge scrolls the timeline,
+  // faster the further out the pointer is, so the playhead never leaves the view.
+  const edgeX = useRef<number | null>(null);
+  const scrollRef = useRef(scroll);
+  scrollRef.current = scroll;
+  useEffect(() => {
+    if (drag?.kind !== "scrub") { edgeX.current = null; return; }
+    let raf = 0;
+    const EDGE = 40;
+    const tick = () => {
+      const x = edgeX.current;
+      if (x != null) {
+        const over = x > size.w - EDGE ? x - (size.w - EDGE) : x < EDGE ? x - EDGE : 0;
+        if (over !== 0) {
+          const next = clampScroll(scrollRef.current + Math.sign(over) * Math.min(40, 2 + Math.abs(over) / 2));
+          if (next !== scrollRef.current) {
+            scrollRef.current = next;
+            setScroll(next);
+            actions.seek(Math.max(0, Math.round((Math.max(0, Math.min(size.w, x)) + next) / ppf)));
+          }
+        }
+      }
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [drag?.kind, size.w, ppf, clampScroll]); // eslint-disable-line react-hooks/exhaustive-deps
+
   /** Apply a drag position; returns the new drag state so a release can use it at once. */
   const applyDrag = (x: number, y: number, drag: Drag): Drag | null => {
     if (drag.kind === "scrub") {
-      actions.seek(frameOf(x));
+      edgeX.current = x;
+      actions.seek(frameOf(Math.max(0, Math.min(size.w, x))));
     } else if (drag.kind === "move") {
       const raw = Math.round((x - drag.x0) / ppf);
       const moved = drag.moved || Math.abs(x - drag.x0) > 3 || Math.abs(y - drag.y0) > 6;
