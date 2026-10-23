@@ -43,6 +43,18 @@ export async function onFileDrop(cb: (paths: string[]) => void): Promise<() => v
   });
 }
 
+/** A URL the webview can play for an imported media file (`file://` asset URL). The shell allows that one file first. */
+export async function mediaFileUrl(url: string): Promise<string | null> {
+  if (!isTauri) return null;
+  const u = new URL(url);
+  let path = decodeURIComponent(u.pathname);
+  if (/^\/[A-Za-z]:/.test(path)) path = path.slice(1).replace(/\//g, "\\");
+  if (u.host) path = `\\\\${u.host}${path.replace(/\//g, "\\")}`;
+  const { invoke, convertFileSrc } = await import("@tauri-apps/api/core");
+  await invoke("allow_media", { path });
+  return convertFileSrc(path);
+}
+
 /** A URL the webview can load for a file the engine rendered into its cache. */
 export async function cacheFileUrl(path: string): Promise<string | null> {
   if (!isTauri) return null;

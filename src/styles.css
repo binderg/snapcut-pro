@@ -219,3 +219,4 @@ body.dragging, body.dragging * { cursor: grabbing !important; user-select: none;
 .handles .knob { fill: var(--accent); stroke: #fff; stroke-width: 1.5; cursor: grab; }
 .handles .guide { stroke: #f0f; stroke-width: 1; stroke-dasharray: 4 3; pointer-events: none; }
 .handles .hlabel { fill: #fff; font-size: 11px; paint-order: stroke; stroke: rgba(0,0,0,.8); stroke-width: 3px; pointer-events: none; }
+.src-scrub { width: 100%; margin: 0; flex: none; accent-color: var(--accent); }

@@ -85,10 +85,22 @@ async fn init_project(ve_bin: String, path: String, fps: String, size: String) -
     run(cmd)
 }
 
+/// Let the webview load one imported media file (for previewing a source
+/// clip). Only that exact file is allowed, never a folder.
+#[tauri::command]
+fn allow_media(app: tauri::AppHandle, path: String) -> Result<(), String> {
+    use tauri::Manager;
+    let p = PathBuf::from(&path);
+    if !p.is_file() {
+        return Err(format!("no file at {path}"));
+    }
+    app.asset_protocol_scope().allow_file(&p).map_err(|e| e.to_string())
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .invoke_handler(tauri::generate_handler![daemon_url, init_project])
+        .invoke_handler(tauri::generate_handler![daemon_url, init_project, allow_media])
         .run(tauri::generate_context!())
         .expect("error while running the ve editor");
 }

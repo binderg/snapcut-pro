@@ -25,6 +25,8 @@ export interface Actions {
   addMarker: () => void;
   removeMarker: (id: string) => void;
   insert: (asset: string, frame?: number, track?: string) => void;
+  /** Drop an asset from the project (refused by the engine while clips use it). */
+  removeAsset: (asset: string) => void;
   /** `push` (ui.move_push): move what is in the way right instead of overwriting it. `reorder`: swap places. */
   move: (clip: string, frame: number, track?: string, mode?: "push" | "reorder") => void;
   trim: (clip: string, side: "in" | "out", frames: number) => void;
@@ -68,6 +70,13 @@ export function Editor({ rpc, projectPath, onClose }: { rpc: Rpc; projectPath: s
   const [playhead, setPlayhead] = useState(0);
   const [selected, setSelected] = useState<string | null>(null);
   const [playing, setPlaying] = useState(false);
+  // An asset shown in the player instead of the timeline (clicked in the media panel).
+  const [source, setSource] = useState<string | null>(null);
+  const showSource = (id: string | null) => {
+    if (id === source) return;
+    setPlaying(false);
+    setSource(id);
+  };
   const [info, setInfo] = useState<string | null>(null);
   const [timelineH, setTimelineH] = useState<number>(() => load("timelineH", 340));
   const [leftW, setLeftW] = useState<number>(() => load("leftW", 360));
@@ -161,6 +170,7 @@ export function Editor({ rpc, projectPath, onClose }: { rpc: Rpc; projectPath: s
       removeMarker: (id) => mutate("marker.remove", { ids: [id] }),
       insert: (asset, frame, track) =>
         mutate("edit.insert", { asset, at: at(frame ?? playheadRef.current), ...(track ? { track } : {}) }),
+      removeAsset: (asset) => mutate("media.remove", { assets: [asset] }),
       move: (clip, frame, track, mode) =>
         mode === "push"
           ? mutate("ui.move_push", { clip, to: at(frame), ...(track ? { track } : {}) })
@@ -309,7 +319,7 @@ export function Editor({ rpc, projectPath, onClose }: { rpc: Rpc; projectPath: s
       </header>
 
       <div className="upper" style={{ gridTemplateColumns: `${leftW}px 6px minmax(320px, 1fr) 6px ${rightW}px` }}>
-        <LeftPanel project={project} engine={engine} actions={actions} playhead={playhead} selected={selectedClip} />
+        <LeftPanel project={project} engine={engine} actions={actions} playhead={playhead} selected={selectedClip} onPreview={showSource} />
         <div className="vsplitter" onPointerDown={startResizeCol("leftW")} onDoubleClick={() => { setLeftW(360); save("leftW", 360); }} title="Drag to resize, double-click to reset" />
         <Player
           project={project}
@@ -320,6 +330,7 @@ export function Editor({ rpc, projectPath, onClose }: { rpc: Rpc; projectPath: s
           seek={actions.seek}
           selected={selected}
           actions={actions}
+          source={project.assets.find((a) => a.id === source) ?? null}
         />
         <div className="vsplitter" onPointerDown={startResizeCol("rightW")} onDoubleClick={() => { setRightW(340); save("rightW", 340); }} title="Drag to resize, double-click to reset" />
         <Inspector project={project} engine={engine} clip={selectedClip} transition={selectedTransition} actions={actions} projectPath={projectPath} />
@@ -334,6 +345,7 @@ export function Editor({ rpc, projectPath, onClose }: { rpc: Rpc; projectPath: s
         selected={selected}
         actions={actions}
         playing={playing}
+        onActivate={() => showSource(null)}
       />
 
       {engine.error && (

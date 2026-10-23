@@ -6,6 +6,7 @@ import { isTauri, pickMedia } from "./host";
 import { Icon } from "./icons";
 import { TransitionsTab } from "./TransitionsTab";
 import { beginDrag, wasDrag } from "./dnd";
+import { ContextMenu } from "./ContextMenu";
 
 type Tab = "media" | "effects" | "transitions" | "markers" | "analyze" | "history";
 
@@ -18,7 +19,7 @@ const TABS: { id: Tab; label: string; icon: () => JSX.Element }[] = [
   { id: "history", label: "History", icon: Icon.history },
 ];
 
-export function LeftPanel(props: { project: Project; engine: Engine; actions: Actions; playhead: number; selected: Clip | null }) {
+export function LeftPanel(props: { project: Project; engine: Engine; actions: Actions; playhead: number; selected: Clip | null; onPreview: (asset: string) => void }) {
   const [tab, setTab] = useState<Tab>("media");
   return (
     <section className="panel">
@@ -40,10 +41,11 @@ export function LeftPanel(props: { project: Project; engine: Engine; actions: Ac
   );
 }
 
-function MediaTab({ project, actions, engine }: { project: Project; actions: Actions; engine: Engine }) {
+function MediaTab({ project, actions, engine, onPreview }: { project: Project; actions: Actions; engine: Engine; onPreview: (asset: string) => void }) {
   const [filter, setFilter] = useState<"all" | "video" | "audio">("all");
   const [q, setQ] = useState("");
   const [sel, setSel] = useState<string | null>(null);
+  const [menu, setMenu] = useState<{ x: number; y: number; asset: string } | null>(null);
   const used = new Set(project.tracks.flatMap((t) => t.clips.map((c) => c.url)));
   const assets = project.assets.filter(
     (a) =>
@@ -75,16 +77,35 @@ function MediaTab({ project, actions, engine }: { project: Project; actions: Act
         ) : (
           <div className="media-grid">
             {assets.map((a) => (
-              <MediaCard key={a.id} engine={engine} a={a} fps={project.fps} used={used.has(a.url)} sel={sel === a.id} onSelect={() => setSel(a.id)} onAdd={() => actions.insert(a.id)} />
+              <MediaCard key={a.id} engine={engine} a={a} fps={project.fps} used={used.has(a.url)} sel={sel === a.id} onSelect={() => { setSel(a.id); onPreview(a.id); }} onAdd={() => actions.insert(a.id)}
+                onMenu={(e) => { e.preventDefault(); setSel(a.id); setMenu({ x: e.clientX, y: e.clientY, asset: a.id }); }} />
             ))}
           </div>
+        )}
+        {menu && (
+          <ContextMenu
+            x={menu.x}
+            y={menu.y}
+            items={[
+              { label: "Insert at beginning", run: () => actions.insert(menu.asset, 0) },
+              { label: "Insert at playhead", run: () => actions.insert(menu.asset) },
+              { label: "Insert at end", run: () => actions.insert(menu.asset, project.duration) },
+              "sep",
+              (() => {
+                const url = project.assets.find((a) => a.id === menu.asset)?.url;
+                const inUse = !!url && used.has(url);
+                return { label: "Delete", hint: inUse ? "on timeline" : undefined, danger: true, disabled: inUse, run: () => actions.removeAsset(menu.asset) };
+              })(),
+            ]}
+            onClose={() => setMenu(null)}
+          />
         )}
       </div>
     </div>
   );
 }
 
-function MediaCard({ a, fps, used, sel, onSelect, onAdd, engine }: { engine: Engine; a: Asset; fps: number; used: boolean; sel: boolean; onSelect: () => void; onAdd: () => void }) {
+function MediaCard({ a, fps, used, sel, onSelect, onAdd, onMenu, engine }: { engine: Engine; a: Asset; fps: number; used: boolean; sel: boolean; onSelect: () => void; onAdd: () => void; onMenu: (e: React.MouseEvent) => void }) {
   const v = a.video;
   const thumb = useThumbnail(engine, a);
   const detail = [v ? `${v.width}x${v.height}` : null, v?.vfr ? "VFR" : null, a.audio ? `${Math.round(a.audio.sample_rate / 1000)}k` : null].filter(Boolean).join(" · ");
@@ -98,6 +119,7 @@ function MediaCard({ a, fps, used, sel, onSelect, onAdd, engine }: { engine: Eng
       }}
       onClick={() => !wasDrag() && onSelect()}
       onDoubleClick={onAdd}
+      onContextMenu={onMenu}
       title={`${a.name}\n${detail}\nDrag to the timeline, or double-click to insert at the playhead`}
     >
       <div className={`thumb ${v ? "" : "audio"}`}>
@@ -289,7 +311,7 @@ function FxTab({ engine, playhead, selected, kind }: { engine: Engine; playhead:
 // Poster frames come from the engine (the UI can't read the media files). Kept for the session.
 const thumbs = new Map<string, string>();
 
-function useThumbnail(engine: Engine, a: Asset): string | null {
+export function useThumbnail(engine: Engine, a: Asset): string | null {
   const [src, setSrc] = useState<string | null>(thumbs.get(a.id) ?? null);
   useEffect(() => {
     if (!a.video || thumbs.has(a.id)) return;

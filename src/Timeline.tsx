@@ -94,7 +94,7 @@ const C = {
   trLine: "rgba(230, 251, 252, 0.7)",
 };
 
-export function Timeline(props: { project: Project; engine: Engine; playhead: number; selected: string | null; actions: Actions; playing: boolean }) {
+export function Timeline(props: { project: Project; engine: Engine; playhead: number; selected: string | null; actions: Actions; playing: boolean; onActivate?: () => void }) {
   const { project, engine, playhead, selected, actions, playing } = props;
   const wrapRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -956,7 +956,7 @@ export function Timeline(props: { project: Project; engine: Engine; playhead: nu
   const scrollThumbX = maxScroll > 0 ? (scroll / maxScroll) * (size.w - scrollThumbW) : 0;
 
   return (
-    <section className="panel timeline">
+    <section className="panel timeline" onPointerDownCapture={props.onActivate}>
       <div className="toolbar">
         <button className="icon-btn on" data-tip="Select"><Icon.pointer /></button>
         <span className="sep" />

@@ -7,8 +7,9 @@
 
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { Engine } from "./engine";
-import { at, Project, timecode } from "./model";
-import { cacheFileUrl, isTauri } from "./host";
+import { Asset, at, Project, timecode } from "./model";
+import { cacheFileUrl, isTauri, mediaFileUrl } from "./host";
+import { useThumbnail } from "./LeftPanel";
 import { Icon } from "./icons";
 import { Handles } from "./Handles";
 import type { Actions } from "./Editor";
@@ -30,8 +31,10 @@ export function Player(props: {
   seek: (f: number) => void;
   selected: string | null;
   actions: Actions;
+  /** An asset to show instead of the timeline (picked in the media panel). */
+  source: Asset | null;
 }) {
-  const { project, engine, playhead, playing, setPlaying, seek, selected, actions } = props;
+  const { project, engine, playhead, playing, setPlaying, seek, selected, actions, source } = props;
   const stageRef = useRef<HTMLDivElement>(null);
   // Two videos: one shows the current chunk while the other loads the next,
   // so a chunk switch never shows an emptied (black) element.
@@ -79,7 +82,7 @@ export function Player(props: {
 
   // Frames at the playhead.
   useEffect(() => {
-    if (empty || videoOn) return;
+    if (empty || videoOn || source) return;
     const frame = Math.min(playhead, project.duration - 1);
     const key = `${project.revision}:${renderWidth}:${frame}`;
     want.current = key;
@@ -104,7 +107,7 @@ export function Player(props: {
       }
     }, playing ? 0 : 40);
     return () => clearTimeout(t);
-  }, [playhead, project.revision, renderWidth, empty, videoOn]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [playhead, project.revision, renderWidth, empty, videoOn, source]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Tell the engine where we are, so it renders ahead into its frame cache
   // (frames an edit just changed first). Older engines without it: ignore.
@@ -195,7 +198,7 @@ export function Player(props: {
   };
 
   useEffect(() => {
-    if (!playing) {
+    if (!playing || source) {
       videoA.current?.pause();
       videoB.current?.pause();
       setVideoOn(false);
@@ -240,7 +243,28 @@ export function Player(props: {
       },
     );
     return () => { cancelled = true; };
-  }, [playing, project.revision]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [playing, project.revision, source]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Source mode: `playing` plays the picked asset instead of the timeline.
+  const srcRef = useRef<HTMLVideoElement>(null);
+  const [srcTime, setSrcTime] = useState(0);
+  useEffect(() => setSrcTime(0), [source?.id]);
+  useEffect(() => {
+    const v = srcRef.current;
+    if (!source || !v) return;
+    if (playing) {
+      if (v.ended) v.currentTime = 0;
+      v.play().catch(() => setPlaying(false));
+    } else {
+      v.pause();
+    }
+  }, [playing, source?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+  const srcSeek = (t: number) => {
+    const v = srcRef.current;
+    if (v) v.currentTime = t;
+    setSrcTime(t);
+  };
+  const srcDur = source ? source.frames / fps : 0;
 
   // Events from the hidden video (loading or finished) are ignored.
   const onTime = (i: number) => {
@@ -271,10 +295,10 @@ export function Player(props: {
 
   return (
     <section className="panel">
-      <div className="panel-head">Player</div>
+      <div className="panel-head">{source ? <>Source <span className="faint">· {source.name}</span></> : "Player"}</div>
       <div className="player-stage" ref={stageRef}>
         <div className="player-frame" style={{ width: box.w, height: box.h }}>
-          {img && !videoOn && <img src={img} alt="" draggable={false} />}
+          {img && !videoOn && !source && <img src={img} alt="" draggable={false} />}
           {videos.map((ref, i) => (
             <video
               key={i}
@@ -286,10 +310,13 @@ export function Player(props: {
               playsInline
             />
           ))}
-          {!empty && !videoOn && !playing && (
+          {source && (
+            <SourceMedia key={source.id} asset={source} engine={engine} videoRef={srcRef} onTime={setSrcTime} onEnded={() => setPlaying(false)} />
+          )}
+          {!empty && !videoOn && !playing && !source && (
             <Handles project={project} playhead={Math.min(playhead, project.duration - 1)} selected={selected} actions={actions} w={box.w} h={box.h} />
           )}
-          {empty && (
+          {empty && !source && (
             <div className="player-empty">
               <div>
                 <div style={{ fontSize: 15, color: "var(--muted)" }}>Empty timeline</div>
@@ -302,6 +329,25 @@ export function Player(props: {
           <div className="player-badge"><span className="spinner" />{buffering ? "Rendering preview…" : "Rendering frame"}</div>
         )}
       </div>
+      {source && (
+        <input className="src-scrub" type="range" min={0} max={srcDur} step={1 / fps} value={Math.min(srcTime, srcDur)}
+          onChange={(e) => srcSeek(Number(e.target.value))} />
+      )}
+      {source ? (
+        <div className="player-bar">
+          <span className="tc mono"><b>{timecode(Math.floor(srcTime * fps), fps)}</b> <span className="faint">/ {timecode(source.frames, fps)}</span></span>
+          <div className="hstack" style={{ gap: 2 }}>
+            <button className="icon-btn" onClick={() => srcSeek(0)} data-tip="Start"><Icon.prev /></button>
+            <button className="icon-btn" onClick={() => setPlaying((p) => !p)} data-tip="Play/Pause (Space)">
+              {playing ? <Icon.pause /> : <Icon.play />}
+            </button>
+            <button className="icon-btn" onClick={() => srcSeek(srcDur)} data-tip="End"><Icon.next /></button>
+          </div>
+          <div className="right muted" style={{ fontSize: 12 }}>
+            {source.video ? `${source.video.width}x${source.video.height}` : "audio"}
+          </div>
+        </div>
+      ) : (
       <div className="player-bar">
         <span className="tc mono"><b>{timecode(playhead, fps)}</b> <span className="faint">/ {timecode(project.duration, fps)}</span></span>
         <div className="hstack" style={{ gap: 2 }}>
@@ -315,6 +361,49 @@ export function Player(props: {
           {project.width}x{project.height}
         </div>
       </div>
+      )}
     </section>
+  );
+}
+
+/** The picked asset, played straight from its file. Formats the webview
+ * can't decode (or a plain browser) show the poster frame and a note. */
+function SourceMedia({ asset, engine, videoRef, onTime, onEnded }: {
+  asset: Asset;
+  engine: Engine;
+  videoRef: React.RefObject<HTMLVideoElement>;
+  onTime: (t: number) => void;
+  onEnded: () => void;
+}) {
+  const thumb = useThumbnail(engine, asset);
+  const [url, setUrl] = useState<string | null>(null);
+  const [ready, setReady] = useState(false);
+  const [failed, setFailed] = useState(false);
+  useEffect(() => {
+    let live = true;
+    mediaFileUrl(asset.url).then(
+      (u) => { if (live) u ? setUrl(u) : setFailed(true); },
+      () => { if (live) setFailed(true); },
+    );
+    return () => { live = false; };
+  }, [asset.url]);
+  const showVideo = !!asset.video && ready && !failed;
+  return (
+    <>
+      {!showVideo && thumb && <img src={thumb} alt="" draggable={false} />}
+      {!asset.video && <div className="player-empty"><Icon.audio /></div>}
+      <video
+        ref={videoRef}
+        src={url ?? undefined}
+        preload="auto"
+        playsInline
+        style={{ visibility: showVideo ? "visible" : "hidden" }}
+        onLoadedData={() => setReady(true)}
+        onError={() => setFailed(true)}
+        onTimeUpdate={(e) => onTime(e.currentTarget.currentTime)}
+        onEnded={onEnded}
+      />
+      {failed && <div className="player-badge">{isTauri ? "Can't preview this format here" : "Source preview plays in the desktop app"}</div>}
+    </>
   );
 }
