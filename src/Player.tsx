@@ -33,7 +33,14 @@ export function Player(props: {
 }) {
   const { project, engine, playhead, playing, setPlaying, seek, selected, actions } = props;
   const stageRef = useRef<HTMLDivElement>(null);
-  const videoRef = useRef<HTMLVideoElement>(null);
+  // Two videos: one shows the current chunk while the other loads the next,
+  // so a chunk switch never shows an emptied (black) element.
+  const videoA = useRef<HTMLVideoElement>(null);
+  const videoB = useRef<HTMLVideoElement>(null);
+  const videos = [videoA, videoB];
+  const srcs = useRef<(string | null)[]>([null, null]);
+  const [front, setFront] = useState(0);
+  const frontRef = useRef(0);
   const [box, setBox] = useState({ w: 640, h: 360 });
   const [img, setImg] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -139,25 +146,58 @@ export function Player(props: {
     return job;
   };
 
+  // Point the hidden video at `src` (no-op if it already has it).
+  const load = (i: number, src: string) => {
+    if (srcs.current[i] === src) return;
+    srcs.current[i] = src;
+    videos[i].current!.src = src;
+  };
+
   const startChunk = (c: Chunk, frame = c.from) => {
     chunk.current = c;
     next.current = c.to < project.duration ? renderChunk(c.to).catch(() => null) : null;
-    const v = videoRef.current!;
-    v.src = c.src;
+    // Load into the hidden video; the visible one (or the still) stays up
+    // until this one has the right frame.
+    const b = 1 - frontRef.current;
+    const v = videos[b].current!;
+    load(b, c.src);
     // Starting mid-chunk: seek once the file is open, and ignore its time until then.
-    startOffset.current = (frame - c.from) / fps;
-    if (frame > c.from) {
-      const seekTo = startOffset.current;
-      v.addEventListener("loadedmetadata", () => { v.currentTime = seekTo; }, { once: true });
-    }
+    const target = (frame - c.from) / fps;
+    startOffset.current = target;
+    const reveal = () => {
+      if (chunk.current !== c) return;
+      const old = videos[frontRef.current].current;
+      frontRef.current = b;
+      setFront(b);
+      if (old && old !== v) old.pause();
+      setVideoOn(true);
+      setBuffering(false);
+      // Preload the next chunk into the video we just hid.
+      const p = next.current;
+      p?.then((n) => {
+        if (n && chunk.current === c) load(1 - b, n.src);
+      });
+    };
+    const ready = () => {
+      if (chunk.current !== c) return;
+      if (Math.abs(v.currentTime - target) > 0.5 / fps) {
+        v.addEventListener("seeked", reveal, { once: true });
+        v.currentTime = target;
+      } else if (v.readyState >= 2) {
+        reveal();
+      } else {
+        v.addEventListener("loadeddata", reveal, { once: true });
+      }
+    };
+    if (v.readyState >= 1) ready();
+    else v.addEventListener("loadedmetadata", ready, { once: true });
     v.play().catch(() => {});
-    setVideoOn(true);
-    setBuffering(false);
   };
 
   useEffect(() => {
     if (!playing) {
-      videoRef.current?.pause();
+      videoA.current?.pause();
+      videoB.current?.pause();
       setVideoOn(false);
       setBuffering(false);
       chunk.current = null;
@@ -202,9 +242,10 @@ export function Player(props: {
     return () => { cancelled = true; };
   }, [playing, project.revision]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const onTime = () => {
-    const v = videoRef.current, c = chunk.current;
-    if (!v || !c || !playing) return;
+  // Events from the hidden video (loading or finished) are ignored.
+  const onTime = (i: number) => {
+    const v = videos[i].current, c = chunk.current;
+    if (i !== frontRef.current || !v || !c || !playing) return;
     if (v.seeking || v.currentTime + 0.05 < startOffset.current) return;
     startOffset.current = 0;
     seek(c.from + Math.floor(v.currentTime * fps));
@@ -214,9 +255,9 @@ export function Player(props: {
     }
   };
 
-  const onEnded = async () => {
+  const onEnded = async (i: number) => {
     const c = chunk.current;
-    if (!c || !playing) return;
+    if (i !== frontRef.current || !c || !playing) return;
     if (c.to >= project.duration) {
       seek(project.duration);
       setPlaying(false);
@@ -234,7 +275,17 @@ export function Player(props: {
       <div className="player-stage" ref={stageRef}>
         <div className="player-frame" style={{ width: box.w, height: box.h }}>
           {img && !videoOn && <img src={img} alt="" draggable={false} />}
-          <video ref={videoRef} style={{ visibility: videoOn ? "visible" : "hidden" }} onTimeUpdate={onTime} onEnded={onEnded} playsInline />
+          {videos.map((ref, i) => (
+            <video
+              key={i}
+              ref={ref}
+              preload="auto"
+              style={{ visibility: videoOn && front === i ? "visible" : "hidden" }}
+              onTimeUpdate={() => onTime(i)}
+              onEnded={() => onEnded(i)}
+              playsInline
+            />
+          ))}
           {!empty && !videoOn && !playing && (
             <Handles project={project} playhead={Math.min(playhead, project.duration - 1)} selected={selected} actions={actions} w={box.w} h={box.h} />
           )}
