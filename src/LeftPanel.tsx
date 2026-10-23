@@ -93,6 +93,8 @@ function MediaCard({ a, fps, used, sel, onSelect, onAdd, engine }: { engine: Eng
       draggable
       onDragStart={(e) => {
         e.dataTransfer.setData("application/x-ve-asset", a.id);
+        // Data is unreadable until the drop; the type list is not, so the timeline can tell picture from sound mid-drag.
+        e.dataTransfer.setData(v ? "application/x-ve-asset-video" : "application/x-ve-asset-audio", "");
         e.dataTransfer.effectAllowed = "copy";
       }}
       onClick={onSelect}
