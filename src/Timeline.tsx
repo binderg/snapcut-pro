@@ -11,7 +11,8 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { Engine } from "./engine";
 import type { Actions } from "./Editor";
-import { alignOf, Clip, Cut, cutsOf, findClip, linkedIds, maxTransition, offsetsFor, Project, shortTime, Track, Transition, TRANSITION_MIME } from "./model";
+import { alignOf, Clip, Cut, cutsOf, findClip, linkedIds, maxTransition, offsetsFor, Project, shortTime, Track, Transition } from "./model";
+import { addDropTarget, Payload } from "./dnd";
 import { Icon } from "./icons";
 import { markerColor } from "./LeftPanel";
 import { ContextMenu, MenuItem } from "./ContextMenu";
@@ -634,48 +635,45 @@ export function Timeline(props: { project: Project; engine: Engine; playhead: nu
     return () => el.removeEventListener("wheel", stop);
   }, []);
 
-  // ---------- drop from the media panel ----------
-  const onDragOver = (e: React.DragEvent) => {
-    if (e.dataTransfer.types.includes(TRANSITION_MIME)) {
-      e.preventDefault();
-      const { x, y } = local(e);
+  // ---------- drop from the panels (pointer drags, see dnd.ts) ----------
+  const dropOver = (pl: Payload, cx: number, cy: number) => {
+    const { x, y } = local({ clientX: cx, clientY: cy });
+    if (pl.kind === "transition") {
       const cut = cutNear(x, y);
-      e.dataTransfer.dropEffect = cut ? "copy" : "none";
       setTrDrop((prev) => (prev?.track.id === cut?.track.id && prev?.frame === cut?.frame ? prev : cut));
       return;
     }
-    if (!e.dataTransfer.types.includes("application/x-ve-asset")) return;
-    e.preventDefault();
-    e.dataTransfer.dropEffect = "copy";
-    const { x, y } = local(e);
     const [f] = snap(frameOf(x), snapPoints(new Set()));
     setDropAt({ frame: f, lane: laneAt(y) });
   };
-  const onDrop = (e: React.DragEvent) => {
-    const trData = e.dataTransfer.getData(TRANSITION_MIME);
-    if (trData) {
-      e.preventDefault();
+  const dropLeave = () => { setDropAt(null); setTrDrop(null); };
+  const dropHere = (pl: Payload) => {
+    if (pl.kind === "transition") {
       const cut = trDrop;
       setTrDrop(null);
-      if (!cut) return;
-      try {
-        const { transition, duration } = JSON.parse(trData) as { transition: string; duration?: string };
-        actions.addTransition(transition, cut, duration);
-      } catch {
-        // not ours
-      }
+      if (cut) actions.addTransition(pl.transition, cut, pl.duration);
       return;
     }
-    const id = e.dataTransfer.getData("application/x-ve-asset");
     const d = dropAt;
     setDropAt(null);
-    if (!id || !d) return;
-    e.preventDefault();
-    const asset = project.assets.find((a) => a.id === id);
+    if (!d) return;
+    const asset = project.assets.find((a) => a.id === pl.id);
     const wantsKind = asset?.video ? "video" : "audio";
     const track = d.lane && d.lane.track.kind === wantsKind ? d.lane.track.name : undefined;
-    actions.insert(id, d.frame, track);
+    actions.insert(pl.id, d.frame, track);
   };
+  const dropFns = useRef({ dropOver, dropLeave, dropHere });
+  dropFns.current = { dropOver, dropLeave, dropHere };
+  useEffect(
+    () =>
+      addDropTarget({
+        el: () => canvasRef.current,
+        over: (p, x, y) => dropFns.current.dropOver(p, x, y),
+        leave: () => dropFns.current.dropLeave(),
+        drop: (p) => dropFns.current.dropHere(p),
+      }),
+    [],
+  );
 
   const sel = selected != null;
   const scrollThumbW = Math.max(30, size.w * (size.w / (maxScroll + size.w)));
@@ -729,9 +727,6 @@ export function Timeline(props: { project: Project; engine: Engine; playhead: nu
             onPointerUp={onPointerUp}
             onPointerCancel={onPointerUp}
             onWheel={onWheel}
-            onDragOver={onDragOver}
-            onDragLeave={() => { setDropAt(null); setTrDrop(null); }}
-            onDrop={onDrop}
             onDoubleClick={(e) => {
               const { x, y } = local(e);
               if (!hit(x, y) && y > RULER_H) fit();

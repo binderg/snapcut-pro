@@ -56,9 +56,6 @@ export interface Transition {
   incoming: string;
 }
 
-/** Drag data type for a transition card dragged from the panel onto a cut. */
-export const TRANSITION_MIME = "application/x-ve-transition";
-
 export type Align = "center" | "start" | "end";
 
 /** The alignment the engine infers from the offsets (same rule as `transition.set`). */
@@ -281,15 +278,38 @@ export function maxTransition(p: Project, cut: { outgoing: Clip; incoming: Clip 
   return Math.max(0, Math.min(2 * before + 1, 2 * after));
 }
 
-/** Fit a wanted length onto a cut: center if the handles allow, else start or end at the cut. */
-export function fitTransition(p: Project, cut: Cut, frames: number, prefer: Align = "center"): { duration: number; align: Align } {
-  const order: Align[] = [prefer, ...(["center", "start", "end"] as Align[]).filter((a) => a !== prefer)];
-  for (const align of order) {
-    const max = maxTransition(p, cut, align);
-    if (max >= (align === "center" ? 2 : 1)) return { duration: Math.max(1, Math.min(frames, max)), align };
+/** Shortest transition worth putting on a cut; below this the clips have no room for one. */
+export const MIN_TRANSITION = 3;
+
+/**
+ * Fit a wanted length onto a cut: the preferred alignment if the clips' spare media allows,
+ * else whichever alignment allows the longest. Null when no alignment has room for even
+ * MIN_TRANSITION frames (typically untrimmed clips placed back to back).
+ */
+export function fitTransition(p: Project, cut: Cut, frames: number, prefer: Align = "center"): { duration: number; align: Align } | null {
+  const want = Math.max(1, Math.round(frames));
+  const room = (["center", "start", "end"] as Align[]).map((align) => ({ align, max: maxTransition(p, cut, align) }));
+  const pref = room.find((r) => r.align === prefer)!;
+  const pick = pref.max >= Math.min(want, MIN_TRANSITION) ? pref : room.reduce((a, b) => (b.max > a.max ? b : a));
+  if (pick.max < Math.min(want, MIN_TRANSITION)) return null;
+  return { duration: Math.min(want, pick.max), align: pick.align };
+}
+
+/** Why a cut has no room for a transition, in words for the user. */
+export function noRoomMessage(cut: Cut): string {
+  const a = cut.outgoing.name || cut.outgoing.id, b = cut.incoming.name || cut.incoming.id;
+  return `No room for a transition between ${a} and ${b}. A transition plays both clips at once, so it needs spare footage: ${a} past its end or ${b} before its start. Trim a few frames off the end of ${a} or the start of ${b}, then try again.`;
+}
+
+/** The cut a click on a transition card means: at the end of the selected video clip, else at the playhead. */
+export function cutFor(p: Project, selected: Clip | null, playhead: number): Cut | null {
+  const cuts = p.tracks.filter((t) => t.kind === "video").flatMap(cutsOf);
+  if (selected?.kind === "video") {
+    const c = cuts.find((c) => c.outgoing.id === selected.id) ?? cuts.find((c) => c.incoming.id === selected.id);
+    if (c) return c;
   }
-  // Nothing fits; send it anyway and let the engine explain.
-  return { duration: Math.max(1, frames), align: prefer };
+  if (!cuts.length) return null;
+  return cuts.reduce((a, b) => (Math.abs(b.frame - playhead) < Math.abs(a.frame - playhead) ? b : a));
 }
 
 /** Clips that move with `clip` (same `link`), including itself. */

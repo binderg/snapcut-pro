@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { Engine } from "./engine";
-import { at, Clip, TRANSITION_MIME } from "./model";
+import type { Actions } from "./Editor";
+import { Clip, cutFor, Project } from "./model";
+import { beginDrag, wasDrag } from "./dnd";
 import { ENGINE_PREVIEWS, getRenderer, GlTransition, H, sceneImage, W } from "./gl/preview";
 
 /** Engine ids of the GL Transitions, once the engine ships them (see the importer script). */
@@ -27,7 +29,7 @@ interface Item {
 
 const titleCase = (s: string) => s.replace(/(^|[ _-])([a-z])/g, (_, a, b) => a + b.toUpperCase());
 
-export function TransitionsTab({ engine, playhead, selected }: { engine: Engine; playhead: number; selected: Clip | null }) {
+export function TransitionsTab({ engine, project, actions, playhead, selected }: { engine: Engine; project: Project; actions: Actions; playhead: number; selected: Clip | null }) {
   const [fx, setFx] = useState<FxEntry[] | null>(null);
   const [gl, setGl] = useState<GlTransition[]>([]);
   const [q, setQ] = useState("");
@@ -66,12 +68,14 @@ export function TransitionsTab({ engine, playhead, selected }: { engine: Engine;
   const filter = (items: Item[]) => items.filter((i) => i.search.includes(q.toLowerCase()));
   const apply = (i: Item) => {
     if (!i.engineId || engine.busy) return;
-    engine.mutate("transition.add", { transition: i.engineId, duration, ...(video ? { clip: video.id } : { at: at(playhead) }) });
+    const cut = cutFor(project, selected, playhead);
+    if (!cut) { engine.report("There is no cut to put a transition on yet: place two clips next to each other on a video track."); return; }
+    actions.addTransition(i.engineId, cut, duration);
   };
 
   const shownBuiltin = filter(builtin);
   const shownGl = filter(glItems);
-  const hint = video ? `Click to put it on the cut at the end of ${video.name || video.id}, or drag it onto any cut.` : "Drag a card onto a cut in the timeline, or click to use the cut at the playhead.";
+  const hint = video ? `Click to put it on the cut at the end of ${video.name || video.id}, or drag it onto any cut.` : "Drag a card onto a cut in the timeline, or click to use the cut nearest the playhead.";
 
   return (
     <div className="single stack">
@@ -119,17 +123,15 @@ function Card({ item, duration, onApply }: { item: Item; duration: string; onApp
   return (
     <div
       className={`tr-card ${usable ? "" : "off"}`}
-      draggable={usable}
-      onDragStart={(e) => {
+      onPointerDown={(e) => {
         if (!item.engineId) return;
-        e.dataTransfer.setData(TRANSITION_MIME, JSON.stringify({ transition: item.engineId, duration }));
-        e.dataTransfer.effectAllowed = "copy";
-        setP(null);
+        e.preventDefault();
+        beginDrag(e, { kind: "transition", transition: item.engineId, duration }, item.name);
       }}
       onMouseMove={move}
       onMouseLeave={() => setP(null)}
-      onClick={onApply}
-      title={`${item.name}${item.detail ? `\n${item.detail}` : ""}${usable ? "\nDrag onto a cut, or click to add at the cut" : "\nPreview only: not in the engine yet"}`}
+      onClick={() => !wasDrag() && onApply()}
+      title={`${item.name}${item.detail ? `\n${item.detail}` : ""}${usable ? "\nDrag onto a cut, or click to add it to the nearest cut" : "\nPreview only: not in the engine yet"}`}
     >
       <div className="tr-thumb">
         <canvas ref={ref} width={W} height={H} />

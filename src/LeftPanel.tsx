@@ -5,6 +5,7 @@ import { Asset, at, Clip, Project, shortTime, timecode } from "./model";
 import { isTauri, pickMedia } from "./host";
 import { Icon } from "./icons";
 import { TransitionsTab } from "./TransitionsTab";
+import { beginDrag, wasDrag } from "./dnd";
 
 type Tab = "media" | "effects" | "transitions" | "markers" | "analyze" | "history";
 
@@ -31,7 +32,7 @@ export function LeftPanel(props: { project: Project; engine: Engine; actions: Ac
       </div>
       {tab === "media" && <MediaTab {...props} />}
       {tab === "effects" && <FxTab {...props} kind="effect" />}
-      {tab === "transitions" && <TransitionsTab engine={props.engine} playhead={props.playhead} selected={props.selected} />}
+      {tab === "transitions" && <TransitionsTab engine={props.engine} project={props.project} actions={props.actions} playhead={props.playhead} selected={props.selected} />}
       {tab === "markers" && <MarkersTab {...props} />}
       {tab === "analyze" && <AnalyzeTab {...props} />}
       {tab === "history" && <HistoryTab {...props} />}
@@ -90,12 +91,12 @@ function MediaCard({ a, fps, used, sel, onSelect, onAdd, engine }: { engine: Eng
   return (
     <div
       className={`media-card ${sel ? "sel" : ""}`}
-      draggable
-      onDragStart={(e) => {
-        e.dataTransfer.setData("application/x-ve-asset", a.id);
-        e.dataTransfer.effectAllowed = "copy";
+      onPointerDown={(e) => {
+        if ((e.target as HTMLElement).closest("button")) return;
+        e.preventDefault();
+        beginDrag(e, { kind: "asset", id: a.id }, a.name);
       }}
-      onClick={onSelect}
+      onClick={() => !wasDrag() && onSelect()}
       onDoubleClick={onAdd}
       title={`${a.name}\n${detail}\nDrag to the timeline, or double-click to insert at the playhead`}
     >
