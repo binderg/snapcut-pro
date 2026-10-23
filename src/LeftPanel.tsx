@@ -133,7 +133,7 @@ function MarkersTab({ project, actions }: { project: Project; actions: Actions }
             <span className="mono muted">{timecode(m.start, project.fps)}</span>
             <span className="grow">{m.name || "(unnamed)"}{m.duration > 0 && <span className="faint"> · {(m.duration / project.fps).toFixed(2)}s</span>}</span>
             {m.source !== "user" && <span className="chip plugin">{m.source}</span>}
-            <button className="icon-btn" style={{ width: 24, height: 24 }} title="Remove" onClick={(e) => { e.stopPropagation(); actions.removeMarker(m.id); }}><Icon.close /></button>
+            <button className="icon-btn" style={{ width: 24, height: 24 }} title="Remove" onClick={(e) => { e.stopPropagation(); actions.removeMarkers([m.id]); }}><Icon.close /></button>
           </div>
         ))}
       </div>

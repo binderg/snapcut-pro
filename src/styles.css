@@ -159,6 +159,9 @@ input[type="range"] { width: 100%; accent-color: var(--accent); }
 .tl-head.off .nm { color: var(--faint); }
 .tl-canvas-wrap { position: relative; min-width: 0; overflow: hidden; }
 .tl-canvas-wrap canvas { position: absolute; inset: 0; display: block; }
+.tl-marker-tip { position: absolute; z-index: 40; transform: translateX(-50%); pointer-events: none; background: #000; color: #eee; padding: 5px 8px; border-radius: 5px; font-size: 11px; white-space: nowrap; border: 1px solid var(--line); display: grid; gap: 2px; }
+.tl-marker-tip .nm { display: flex; align-items: center; gap: 6px; font-weight: 600; }
+.tl-marker-tip .dot { width: 8px; height: 8px; border-radius: 2px; flex: none; }
 .tl-scroll { height: 12px; flex: none; position: relative; margin-left: 148px; }
 .tl-scroll .thumb { position: absolute; top: 3px; height: 6px; border-radius: 3px; background: var(--panel-3); cursor: pointer; }
 .tl-scroll .thumb:hover { background: #3a3a42; }

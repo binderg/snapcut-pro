@@ -23,7 +23,7 @@ export interface Actions {
   undo: () => void;
   redo: () => void;
   addMarker: () => void;
-  removeMarker: (id: string) => void;
+  removeMarkers: (ids: string[]) => void;
   insert: (asset: string, frame?: number, track?: string) => void;
   /** `push` (ui.move_push): move what is in the way right instead of overwriting it. `reorder`: swap places. */
   move: (clip: string, frame: number, track?: string, mode?: "push" | "reorder") => void;
@@ -158,7 +158,7 @@ export function Editor({ rpc, projectPath, onClose }: { rpc: Rpc; projectPath: s
       undo: () => mutate("history.undo"),
       redo: () => mutate("history.redo"),
       addMarker: () => mutate("marker.add", { at: at(playheadRef.current), name: "marker", color: "CYAN" }),
-      removeMarker: (id) => mutate("marker.remove", { ids: [id] }),
+      removeMarkers: (ids) => mutate("marker.remove", { ids }),
       insert: (asset, frame, track) =>
         mutate("edit.insert", { asset, at: at(frame ?? playheadRef.current), ...(track ? { track } : {}) }),
       move: (clip, frame, track, mode) =>

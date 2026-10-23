@@ -11,7 +11,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { Engine } from "./engine";
 import type { Actions } from "./Editor";
-import { alignOf, Clip, Cut, cutsOf, findClip, linkedIds, maxTransition, offsetsFor, Project, shortTime, Track, Transition } from "./model";
+import { alignOf, Clip, Cut, cutsOf, findClip, linkedIds, Marker, maxTransition, offsetsFor, Project, shortTime, timecode, Track, Transition } from "./model";
 import { addDropTarget, Payload } from "./dnd";
 import { Icon } from "./icons";
 import { markerColor } from "./LeftPanel";
@@ -53,7 +53,8 @@ interface Lane {
 }
 
 type Drag =
-  | { kind: "scrub" }
+  /** `ruler`: started on the ruler, so the playhead snaps to markers and cuts (hold Alt to not snap). */
+  | { kind: "scrub"; ruler: boolean }
   | {
       kind: "move";
       clip: Clip;
@@ -112,6 +113,8 @@ export function Timeline(props: { project: Project; engine: Engine; playhead: nu
   const [trDrop, setTrDrop] = useState<Cut | null>(null);
   const [snapAt, setSnapAt] = useState<number | null>(null);
   const [hoverCursor, setHoverCursor] = useState("default");
+  const [hoverMarker, setHoverMarker] = useState<{ m: Marker; x: number } | null>(null);
+  const altRef = useRef(false);
   const [sheet, setSheet] = useState<Sheet | null>(null);
   const fitted = useRef(false);
   const fps = project.fps;
@@ -283,6 +286,29 @@ export function Timeline(props: { project: Project; engine: Engine; playhead: nu
       if (d <= bestD) { best = p; bestD = d; }
     }
     return best == null ? [frame, null] : [best, best];
+  };
+
+  /** The marker flag under the pointer on the ruler (nearest one if they overlap). */
+  const hitMarker = (x: number, y: number): Marker | null => {
+    if (y < 0 || y > RULER_H) return null;
+    let best: Marker | null = null, bestD = 7;
+    for (const m of project.markers) {
+      const d = Math.abs(xOf(m.start) - x);
+      if (d <= bestD) { best = m; bestD = d; }
+    }
+    return best;
+  };
+
+  /** Playhead position for a scrub at `x`: on the ruler it snaps to markers (both ends) and cuts. */
+  const scrubTo = (x: number, ruler: boolean) => {
+    const raw = frameOf(x);
+    if (!ruler || altRef.current) { setSnapAt(null); return raw; }
+    const pts = [0, project.duration];
+    for (const m of project.markers) pts.push(m.start, m.start + m.duration);
+    for (const t of project.tracks) for (const c of t.clips) pts.push(c.start, c.end);
+    const [f, p] = snap(raw, pts);
+    setSnapAt(p);
+    return f;
   };
 
   // ---------- drawing ----------
@@ -547,9 +573,11 @@ export function Timeline(props: { project: Project; engine: Engine; playhead: nu
     if (e.button !== 0) return;
     const { x, y } = local(e);
     canvasRef.current!.setPointerCapture(e.pointerId);
+    altRef.current = e.altKey;
+    setHoverMarker(null);
     if (y < RULER_H) {
-      setDrag({ kind: "scrub" });
-      actions.seek(frameOf(x));
+      setDrag({ kind: "scrub", ruler: true });
+      actions.seek(scrubTo(x, true));
       return;
     }
     const ht = hitTransition(x, y);
@@ -562,7 +590,7 @@ export function Timeline(props: { project: Project; engine: Engine; playhead: nu
     const h = hit(x, y);
     if (!h) {
       actions.select(null);
-      setDrag({ kind: "scrub" });
+      setDrag({ kind: "scrub", ruler: false });
       actions.seek(frameOf(x));
       return;
     }
@@ -574,6 +602,12 @@ export function Timeline(props: { project: Project; engine: Engine; playhead: nu
   const onContextMenu = (e: React.MouseEvent) => {
     e.preventDefault();
     const { x, y } = local(e);
+    const hm = hitMarker(x, y);
+    if (hm) {
+      setHoverMarker(null);
+      setMenu({ x: e.clientX, y: e.clientY, items: markerMenu(hm) });
+      return;
+    }
     const ht = y < RULER_H ? null : hitTransition(x, y);
     if (ht) {
       actions.select(ht.tr.id);
@@ -592,6 +626,17 @@ export function Timeline(props: { project: Project; engine: Engine; playhead: nu
     "sep",
     { label: "Unlink", hint: linkedIds(project, c).size > 1 ? undefined : "not linked", disabled: linkedIds(project, c).size < 2, run: () => actions.unlink(c.id) },
   ];
+
+  const markerMenu = (m: Marker): (MenuItem | "sep")[] => {
+    const same = project.markers.filter((o) => o.name === m.name);
+    const items: (MenuItem | "sep")[] = [
+      { label: "Go to marker", run: () => actions.seek(m.start) },
+      "sep",
+      { label: "Delete marker", danger: true, run: () => actions.removeMarkers([m.id]) },
+    ];
+    if (same.length > 1) items.push({ label: `Delete all ${same.length} "${m.name}" markers`, danger: true, run: () => actions.removeMarkers(same.map((o) => o.id)) });
+    return items;
+  };
 
   /**
    * Header menu. For video, up means a higher layer (a higher index); audio tracks are listed by
@@ -629,8 +674,14 @@ export function Timeline(props: { project: Project; engine: Engine; playhead: nu
 
   const onPointerMove = (e: React.PointerEvent) => {
     const { x, y } = local(e);
+    altRef.current = e.altKey;
     if (!drag) {
-      if (y < RULER_H) return setHoverCursor("pointer");
+      if (y < RULER_H) {
+        const m = hitMarker(x, y);
+        setHoverMarker((prev) => (m ? (prev?.m === m ? prev : { m, x: xOf(m.start) }) : null));
+        return setHoverCursor("pointer");
+      }
+      setHoverMarker(null);
       const ht = hitTransition(x, y);
       if (ht) return setHoverCursor(ht.edge ? "ew-resize" : "grab");
       const h = hit(x, y);
@@ -743,7 +794,7 @@ export function Timeline(props: { project: Project; engine: Engine; playhead: nu
   /** Apply a drag position; returns the new drag state so a release can use it at once. */
   const applyDrag = (x: number, y: number, drag: Drag): Drag | null => {
     if (drag.kind === "scrub") {
-      actions.seek(frameOf(x));
+      actions.seek(scrubTo(x, drag.ruler));
     } else if (drag.kind === "move") {
       const raw = Math.round((x - drag.x0) / ppf);
       const moved = drag.moved || Math.abs(x - drag.x0) > 3 || Math.abs(y - drag.y0) > 6;
@@ -1026,12 +1077,23 @@ export function Timeline(props: { project: Project; engine: Engine; playhead: nu
             onPointerMove={onPointerMove}
             onPointerUp={onPointerUp}
             onPointerCancel={onPointerUp}
+            onPointerLeave={() => setHoverMarker(null)}
             onWheel={onWheel}
             onDoubleClick={(e) => {
               const { x, y } = local(e);
               if (!hit(x, y) && y > RULER_H) fit();
             }}
           />
+          {hoverMarker && !drag && !menu && (
+            <div className="tl-marker-tip" style={{ left: Math.max(4, Math.min(hoverMarker.x, size.w - 4)), top: RULER_H + 4 }}>
+              <div className="nm"><span className="dot" style={{ background: markerColor(hoverMarker.m.color) }} />{hoverMarker.m.name || "marker"}</div>
+              <div className="mono muted">
+                {timecode(hoverMarker.m.start, fps)}
+                {hoverMarker.m.duration > 0 && <> – {timecode(hoverMarker.m.start + hoverMarker.m.duration, fps)} ({(hoverMarker.m.duration / fps).toFixed(2)}s)</>}
+              </div>
+              {hoverMarker.m.comment && <div className="muted">{hoverMarker.m.comment}</div>}
+            </div>
+          )}
           {menu && <ContextMenu x={menu.x} y={menu.y} items={menu.items} onClose={() => setMenu(null)} />}
           {project.duration === 0 && (
             <div style={{ position: "absolute", left: 24, top: RULER_H + 24, color: "var(--faint)", pointerEvents: "none" }}>
