@@ -70,15 +70,18 @@ export function TransitionPanel({ project, engine, tr, actions }: { project: Pro
   const applyToAll = async () => {
     const track = project.tracks.find((t) => t.id === tr.trackId);
     if (!track) return;
+    const skipped: string[] = [];
     await engine.group("Apply transition to all", async () => {
       for (const cut of cutsOf(track)) {
         if (cut.transition?.id === tr.id) continue;
         const fit = fitTransition(project, cut, frames, align);
+        if (!fit) { skipped.push(`${cut.outgoing.name || cut.outgoing.id} → ${cut.incoming.name || cut.incoming.id}`); continue; }
         const common = { transition: tr.kind, params: tr.params, duration: `f${fit.duration}`, align: fit.align };
         if (cut.transition) await engine.mutate("transition.set", { id: cut.transition.id, ...common });
         else await engine.mutate("transition.add", { clip: cut.outgoing.id, ...common });
       }
     });
+    if (skipped.length) engine.report(`Skipped ${skipped.length} cut${skipped.length > 1 ? "s" : ""} with no spare footage for a transition (${skipped.join(", ")}). Trim the clips around them first.`);
   };
 
   const kinds = fx.length ? fx : [{ id: baseId(tr.kind), reference: tr.kind, kind: "transition", name: baseId(tr.kind) }];

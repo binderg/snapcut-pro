@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Rpc } from "./rpc";
 import { useEngine } from "./engine";
-import { Align, alignOf, at, Clip, Cut, delta, findClip, findTransition, fitTransition, linkedIds, Project, Transition } from "./model";
+import { Align, alignOf, at, Clip, Cut, delta, findClip, findTransition, fitTransition, linkedIds, noRoomMessage, Project, Transition } from "./model";
 import { onFileDrop } from "./host";
 import { Icon } from "./icons";
 import { LeftPanel } from "./LeftPanel";
@@ -50,7 +50,7 @@ function framesOf(d: string | undefined, fps: number): number {
 
 export function Editor({ rpc, projectPath, onClose }: { rpc: Rpc; projectPath: string | null; onClose: () => void }) {
   const engine = useEngine(rpc);
-  const { project, mutate, group } = engine;
+  const { project, mutate, group, report } = engine;
   const [playhead, setPlayhead] = useState(0);
   const [selected, setSelected] = useState<string | null>(null);
   const [playing, setPlaying] = useState(false);
@@ -165,6 +165,7 @@ export function Editor({ rpc, projectPath, onClose }: { rpc: Rpc; projectPath: s
           return;
         }
         const fit = fitTransition(p, cut, framesOf(duration, p.fps));
+        if (!fit) { report(noRoomMessage(cut)); return; }
         const r: any = await mutate("transition.add", { clip: cut.outgoing.id, transition: kind, duration: `f${fit.duration}`, align: fit.align });
         if (r?.id) setSelected(r.id);
       },
@@ -177,6 +178,7 @@ export function Editor({ rpc, projectPath, onClose }: { rpc: Rpc; projectPath: s
         const p = projRef.current;
         if (!p || (to.track.id === tr.trackId && to.frame === tr.cut)) return;
         const fit = fitTransition(p, to, tr.inOffset + tr.outOffset, alignOf(tr));
+        if (!fit) { report(noRoomMessage(to)); return; }
         let id: string | null = null;
         await group("Move transition", async () => {
           if (to.transition) {
@@ -191,7 +193,7 @@ export function Editor({ rpc, projectPath, onClose }: { rpc: Rpc; projectPath: s
         if (id) setSelected(id);
       },
     }),
-    [mutate, group, targetClip, selected],
+    [mutate, group, report, targetClip, selected],
   );
 
   // Files dropped from the OS (desktop app only).

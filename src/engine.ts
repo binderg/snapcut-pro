@@ -20,6 +20,8 @@ export interface Engine {
   busy: string | null;
   error: string | null;
   clearError: () => void;
+  /** Show a message in the error toast (for problems the UI catches before calling the engine). */
+  report: (message: string) => void;
   query: <T = any>(method: string, params?: Record<string, unknown>, busy?: string) => Promise<T>;
   mutate: <T = any>(method: string, params?: Record<string, unknown>, busy?: string) => Promise<T | null>;
   /** Run several mutations as one undo step. */
@@ -119,7 +121,7 @@ export function useEngine(rpc: Rpc): Engine {
     [rpc, refetch],
   );
 
-  return { project, history, lastChange, busy, error, clearError: () => setError(null), query, mutate, group };
+  return { project, history, lastChange, busy, error, clearError: () => setError(null), report: setError, query, mutate, group };
 }
 
 /** `{kind: "agent", id: "claude"}` -> `agent:claude`; the local user is just `user`. */
