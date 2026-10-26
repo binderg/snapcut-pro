@@ -6,11 +6,14 @@ import { beginDrag, wasDrag } from "./dnd";
 import { ENGINE_PREVIEWS, getRenderer, GlTransition, H, sceneImage, W } from "./gl/preview";
 
 /**
- * Engine id of a GL Transition. They are not built into the engine: the editor ships
- * the converted WGSL (scripts/import_gl_transitions.py) and defines it in the project
- * with `fx.define` the first time it is used, so the project renders anywhere.
+ * GL Transitions come from the gl-transitions effect pack (ids `gl.transition/<id>`),
+ * which the desktop shell installs on start. The engine copies one into the project
+ * the first time it is used, so the project renders anywhere. This file only keeps
+ * the original GLSL for the preview cards. Projects from before the pack may hold
+ * `project.gl-<id>` copies made with `fx.define`; those still render.
  */
-export const glEngineId = (id: string) => `project.gl-${id}`;
+const GL_PACK = "gl.transition/";
+const OLD_GL = "project.gl-";
 
 interface FxEntry {
   id: string;
@@ -26,7 +29,7 @@ interface Item {
   name: string;
   /** The engine's id when it can apply this transition, else null (preview only). */
   engineId: string | null;
-  /** GL Transitions: what `fx.define` needs when the project does not have it yet. */
+  /** GL Transitions: the preview data. */
   gl: GlTransition | null;
   preview: GlTransition | null;
   detail: string;
@@ -52,7 +55,7 @@ export function TransitionsTab({ engine, project, actions, playhead, selected }:
 
   const { builtin, glItems } = useMemo(() => {
     const builtin: Item[] = (fx ?? [])
-      .filter((e) => e.kind === "transition" && !e.id.startsWith(glEngineId("")))
+      .filter((e) => e.kind === "transition" && !e.id.startsWith(GL_PACK) && !e.id.startsWith(OLD_GL))
       .map((e) => ({
         key: e.id,
         name: e.name,
@@ -62,10 +65,12 @@ export function TransitionsTab({ engine, project, actions, playhead, selected }:
         detail: e.description ?? "",
         search: `${e.name} ${e.description ?? ""}`.toLowerCase(),
       }));
+    // Usable when the engine lists it: from the installed pack, or already in this project.
+    const known = new Set((fx ?? []).map((e) => e.id));
     const glItems: Item[] = gl.map((t) => ({
       key: `gl:${t.id}`,
       name: t.name || titleCase(t.id),
-      engineId: t.engine ? glEngineId(t.id) : null,
+      engineId: t.engine_id && known.has(t.engine_id) ? t.engine_id : null,
       gl: t,
       preview: t,
       detail: [t.description, t.author && `by ${t.author}`, t.license && t.license !== "MIT" && `license: ${t.license}`].filter(Boolean).join(" · "),
@@ -75,21 +80,10 @@ export function TransitionsTab({ engine, project, actions, playhead, selected }:
   }, [fx, gl]);
 
   const filter = (items: Item[]) => items.filter((i) => i.search.includes(q.toLowerCase()));
-  /** Make sure the engine has this transition: the first use of a GL Transition saves it into the project's effects/ folder. */
+  /** Whether the engine can apply this transition. The engine copies a pack transition into the project itself on first use. */
   const ensure = async (i: Item): Promise<boolean> => {
-    if (!i.engineId || fx === null) return false;
     setProblem(null);
-    const gl = i.gl?.engine;
-    if (gl && !fx.some((e) => e.id === i.engineId)) {
-      try {
-        await engine.query("fx.define", { manifest: gl.manifest, source: gl.wgsl, files: gl.files }, `Adding ${i.name}`);
-      } catch (e: any) {
-        setProblem(`${i.name}: the engine refused it: ${e?.message ?? e}`);
-        return false;
-      }
-      await loadFx();
-    }
-    return true;
+    return !!i.engineId && fx !== null;
   };
   const apply = async (i: Item) => {
     if (!i.engineId || engine.busy) return;
@@ -118,7 +112,8 @@ export function TransitionsTab({ engine, project, actions, playhead, selected }:
       {shownBuiltin.length + shownGl.length === 0 && gl.length > 0 && <p className="note">No transitions found.</p>}
       <p className="note">
         GL Transitions are by their authors (MIT unless a card says otherwise). The first use copies one into the project's effects folder.
-        {glItems.some((i) => !i.engineId) && ' Cards marked "Preview" did not convert for the engine.'}
+        {fx !== null && gl.length > 0 && !glItems.some((i) => i.engineId) && " The GL Transitions pack is not installed: restart the editor, or run `ve plugin install plugins/gl-transitions`."}
+        {glItems.some((i) => i.engineId) && glItems.some((i) => !i.engineId) && ' Cards marked "Preview" did not convert for the engine.'}
       </p>
     </div>
   );
@@ -172,7 +167,7 @@ function Card({ item, duration, onApply, prepare }: { item: Item; duration: stri
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
       onClick={() => !wasDrag() && onApply()}
-      title={`${item.name}${item.detail ? `\n${item.detail}` : ""}${usable ? "\nDrag onto a cut, or click to add it to the nearest cut" : `\nPreview only: ${item.gl?.engine_error?.split("\n")[0] ?? "not in the engine yet"}`}`}
+      title={`${item.name}${item.detail ? `\n${item.detail}` : ""}${usable ? "\nDrag onto a cut, or click to add it to the nearest cut" : `\nPreview only: ${item.gl?.engine_error?.split("\n")[0] ?? "the GL Transitions pack is not installed"}`}`}
     >
       <div className="tr-thumb">
         <canvas ref={ref} width={W} height={H} />

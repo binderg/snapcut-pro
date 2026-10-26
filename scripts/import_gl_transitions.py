@@ -1,15 +1,25 @@
-"""Collect the GL Transitions shaders into src/gl/transitions.json, converted for the engine.
+"""Convert the GL Transitions shaders into the engine's gl-transitions effect pack.
 
     git clone --depth 1 https://github.com/gl-transitions/gl-transitions.git <dir>
     cargo install naga-cli --version 30.0.1
-    python -I scripts/import_gl_transitions.py <dir> [--out out.json] [--naga naga] [--check ve]
+    python -I scripts/import_gl_transitions.py <dir> [--out out.json] [--pack dir] [--pack-version 1.1.0] [--naga naga] [--check ve]
 
-Each entry keeps the shader's own source and header (author, license) untouched
-in `glsl`; the editor's preview cards render that in WebGL. Each entry also gets
-`engine`: a transition manifest (id `project.gl-<id>`) plus WGSL for the engine's
-`wgsl` runtime and any images its params need, which the editor sends with
-`fx.define` the first time a project uses it. Entries that do not convert get
-`engine: null` and the reason in `engine_error`.
+Two outputs:
+
+- The effect pack (`--pack`, default `plugins/gl-transitions` in the engine
+  repository): one folder per shader under `transitions/` with an
+  `effect.json` (id `gl.transition/<id>`), the WGSL for the engine's `wgsl`
+  runtime (it starts with the shader's own author and license header), and
+  any images its params need, plus the repository's LICENSE. The editor
+  installs the pack; the engine copies a transition into a project the first
+  time the project uses it.
+- The editor's previews (`--out`, default `src/gl/transitions.json`): each
+  shader's own source and header untouched in `glsl`, which the preview cards
+  render in WebGL, and `engine_id`, the pack id to apply. Shaders that do not
+  convert get `engine_id: null` and the reason in `engine_error`.
+
+Bump `--pack-version` when the shaders change: the editor reinstalls the pack
+when its version differs from the installed one.
 
 How a shader converts:
 
@@ -456,7 +466,7 @@ def convert(t: dict, naga: str, work: Path) -> dict:
     wgsl = header_comment(t["glsl"]) + "\n//\n" + note + "\n" + body
     credit = ", ".join(x for x in [t["author"] and f"by {t['author']}", f"license {t['license']}", "GL Transitions"] if x)
     manifest = {
-        "id": f"project.gl-{t['id']}",
+        "id": pack_id(t),
         "version": "1.0.0",
         "kind": "transition",
         "runtime": "wgsl",
@@ -468,11 +478,86 @@ def convert(t: dict, naga: str, work: Path) -> dict:
     return {"manifest": manifest, "wgsl": wgsl, "files": files}
 
 
+# --- the effect pack and the editor's previews ---
+
+PACK = "gl-transitions"
+UI = Path(__file__).resolve().parent.parent
+
+
+def pack_id(t: dict) -> str:
+    """The transition's id in the pack (what clips store, with `@1`)."""
+    return f"gl.transition/{t['id']}"
+
+
+def write_pack(entries: list, pack: Path, repo_license: str, version: str) -> int:
+    """Write the effect pack: plugin.json, the repo's LICENSE, and one folder per
+    converted transition (effect.json, transition.wgsl with the shader's own
+    license header, and any images). Replaces `transitions/` wholesale."""
+    out = pack / "transitions"
+    if out.exists():
+        shutil.rmtree(out)
+    n = 0
+    for t in entries:
+        e = t.get("engine")
+        if not e:
+            continue
+        d = out / t["id"]
+        d.mkdir(parents=True)
+        manifest = dict(e["manifest"], id=pack_id(t))
+        (d / "effect.json").write_text(json.dumps(manifest, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
+        (d / manifest["shader"]).write_text(e["wgsl"], encoding="utf-8")
+        for name, b64 in (e.get("files") or {}).items():
+            (d / name).write_bytes(base64.b64decode(b64))
+        n += 1
+    plugin = {
+        "id": PACK,
+        "version": version,
+        "engine": ">=0.1.0-rc.1",
+        "protocol": "1",
+        "name": "GL Transitions",
+        "description": f"{n} transitions from gl-transitions.com, converted to WGSL. Each keeps its author's license.",
+        "contributes": {"effects": ["transitions"]},
+    }
+    (pack / "plugin.json").write_text(json.dumps(plugin, indent=2) + "\n", encoding="utf-8")
+    if repo_license:
+        (pack / "LICENSE").write_text(repo_license, encoding="utf-8")
+    return n
+
+
+def previews(entries: list) -> list:
+    """The editor's copy: what its preview cards need (the original GLSL), and
+    the pack id to apply, or null when the converter could not make one."""
+    keep = ["id", "name", "author", "license", "description", "tags", "params", "glsl", "engine_error"]
+    out = []
+    for t in entries:
+        e = t.get("engine") or {}
+        props = (e.get("manifest") or {}).get("params", {}).get("properties", {})
+        # Images for sampler params (luma or displacement maps), by GLSL param name.
+        images = {q.get("title"): e["files"][q["default"]] for q in props.values() if isinstance(q.get("default"), str) and q["default"] in (e.get("files") or {})}
+        item = dict({k: t[k] for k in keep if k in t}, engine_id=pack_id(t) if e else None)
+        if images:
+            item["images"] = images
+        out.append(item)
+    return out
+
+
+def pack_version(pack: Path, given: str | None) -> str:
+    """`--pack-version`, else the version already in the pack, else 1.0.0.
+    The editor reinstalls the pack when this changes, so bump it with new shaders."""
+    if given:
+        return given
+    try:
+        return json.loads((pack / "plugin.json").read_text(encoding="utf-8"))["version"]
+    except (OSError, ValueError, KeyError):
+        return "1.0.0"
+
+
 # --- checking against the engine ---
 
 
 def check_all(ve: str, entries: list, work: Path) -> dict:
-    """fx.define dry runs against a scratch project. Returns id -> error for failures."""
+    """fx.define dry runs against a scratch project. Returns id -> error for failures.
+    fx.define only takes `project.` ids, so each is checked under one."""
     proj = work / "check-project"
     r = subprocess.run([ve, "init", str(proj), "--fps", "30", "--size", "1280x720"], capture_output=True, text=True)
     if r.returncode != 0:
@@ -483,7 +568,8 @@ def check_all(ve: str, entries: list, work: Path) -> dict:
             e = t["engine"]
             if not e:
                 continue
-            params = json.dumps({"manifest": e["manifest"], "source": e["wgsl"], "files": e["files"], "dry_run": True})
+            manifest = dict(e["manifest"], id=f"project.gl-{t['id']}")
+            params = json.dumps({"manifest": manifest, "source": e["wgsl"], "files": e["files"], "dry_run": True})
             r = subprocess.run([ve, "--project", str(proj), "--json", "call", "fx.define", params], capture_output=True, text=True)
             if r.returncode != 0:
                 failures[t["id"]] = (r.stderr.strip() or r.stdout.strip())[:2000]
@@ -492,10 +578,23 @@ def check_all(ve: str, entries: list, work: Path) -> dict:
     return failures
 
 
+def write_previews(entries: list, out: Path, repo_license: str) -> None:
+    doc = {
+        "source": "https://github.com/gl-transitions/gl-transitions",
+        "note": "Previews for the editor. The engine's WGSL lives in the gl-transitions effect pack (plugins/gl-transitions in the engine repository); each shader keeps its own author and license header there and in `glsl`.",
+        "repo_license": repo_license,
+        "transitions": previews(entries),
+    }
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(doc, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Import and convert GL Transitions.")
     ap.add_argument("repo", type=Path)
-    ap.add_argument("--out", type=Path, default=Path(__file__).resolve().parent.parent / "src" / "gl" / "transitions.json")
+    ap.add_argument("--out", type=Path, default=UI / "src" / "gl" / "transitions.json", help="the editor's previews")
+    ap.add_argument("--pack", type=Path, default=UI.parent / "plugins" / PACK, help="the effect pack (in the engine repository)")
+    ap.add_argument("--pack-version", help="version for the pack's plugin.json (default: keep the current one)")
     ap.add_argument("--naga", default="naga")
     ap.add_argument("--check", metavar="VE", help="ve binary: validate every converted shader with fx.define dry_run")
     ap.add_argument("--keep", type=Path, help="keep the naga input and output here (debugging)")
@@ -528,19 +627,15 @@ def main() -> int:
     for t in items_:
         if t["id"] in errors:
             t["engine_error"] = errors[t["id"]]
-    doc = {
-        "source": "https://github.com/gl-transitions/gl-transitions",
-        "note": "Each shader keeps its own author and license; see its header in `glsl` (copied into the WGSL too).",
-        "repo_license": license_file.read_text(encoding="utf-8", errors="replace") if license_file else "",
-        "transitions": items_,
-    }
-    a.out.parent.mkdir(parents=True, exist_ok=True)
-    a.out.write_text(json.dumps(doc, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
+    repo_license = license_file.read_text(encoding="utf-8", errors="replace") if license_file else ""
+    n = write_pack(items_, a.pack, repo_license, pack_version(a.pack, a.pack_version))
+    print(f"{n} transitions -> pack {a.pack}")
+    write_previews(items_, a.out, repo_license)
     licenses = {}
     for i in items_:
         licenses[i["license"]] = licenses.get(i["license"], 0) + 1
     ok = sum(1 for t in items_ if t["engine"])
-    print(f"{len(items_)} transitions -> {a.out}")
+    print(f"{len(items_)} previews -> {a.out}")
     print(f"converted: {ok}{' (checked with fx.define)' if a.check else ' (not checked; pass --check ve)'}")
     print("licenses:", licenses)
     print("param types:", sorted({p['type'] for i in items_ for p in i['params']}))

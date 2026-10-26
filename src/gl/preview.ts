@@ -2,23 +2,14 @@
 // context renders into a small offscreen canvas; a card copies the result into its own
 // 2D canvas. Shaders compile on first hover, and a shader that fails to compile just
 // gets no preview. The previews run the original GLSL; the engine renders the WGSL
-// that scripts/import_gl_transitions.py converted from it (`engine` on each entry).
+// that scripts/import_gl_transitions.py converted from it, from the gl-transitions
+// effect pack (`engine_id` on each entry).
 
 export interface GlParam {
   type: string;
   name: string;
   default: string;
   doc: string;
-}
-
-/** What the editor sends to `fx.define` the first time a project uses a GL Transition. */
-export interface GlEngine {
-  /** `effect.json`: id `project.gl-<id>`, kind `transition`. */
-  manifest: { id: string; params: { properties: Record<string, { title?: string; default?: unknown }> } } & Record<string, unknown>;
-  /** The converted WGSL (keeps the original author and license header). */
-  wgsl: string;
-  /** Images for sampler params (default luma or displacement map): file name to base64 PNG. */
-  files: Record<string, string>;
 }
 
 export interface GlTransition {
@@ -30,9 +21,11 @@ export interface GlTransition {
   tags: string[];
   params: GlParam[];
   glsl: string;
-  /** The engine version, or null when the converter could not make one (see `engine_error`). */
-  engine?: GlEngine | null;
+  /** Its id in the gl-transitions effect pack (`gl.transition/<id>`), or null when the converter could not make one (see `engine_error`). */
+  engine_id?: string | null;
   engine_error?: string;
+  /** Images for sampler params (the default luma or displacement map): GLSL param name to base64 PNG. */
+  images?: Record<string, string>;
 }
 
 export const W = 320;
@@ -192,14 +185,12 @@ class Renderer {
     gl.uniform1f(gl.getUniformLocation(prog, "ratio"), W / H);
     let unit = 2;
     const samplers: WebGLTexture[] = [];
-    const props = Object.values(t.engine?.manifest.params.properties ?? {});
     for (const p of t.params) {
       const loc = gl.getUniformLocation(prog, p.name);
       if (loc && setUniform(gl, loc, p, unit)) {
         unit++;
-        const file = props.find((q) => q.title === p.name)?.default;
-        const b64 = typeof file === "string" ? t.engine?.files[file] : undefined;
-        samplers.push(typeof file === "string" && b64 ? this.image(file, b64) : this.tex[2]);
+        const b64 = t.images?.[p.name];
+        samplers.push(b64 ? this.image(`${t.id}:${p.name}`, b64) : this.tex[2]);
       }
     }
     return { prog, progressLoc: gl.getUniformLocation(prog, "progress"), samplers };

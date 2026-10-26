@@ -64,9 +64,58 @@ fn run(mut cmd: Command) -> Result<String, String> {
     }
 }
 
+/// Effect packs the editor ships (bundled resources), installed for the user
+/// on start so the engine's `fx.list` has them.
+const PACKS: &[&str] = &["gl-transitions"];
+
+/// Where a bundled pack is: the app's resources, or in a dev build the
+/// engine repository this editor sits in.
+fn bundled_pack(app: &tauri::AppHandle, id: &str) -> Option<PathBuf> {
+    use tauri::Manager;
+    let res = app.path().resource_dir().ok().map(|d| d.join("plugins").join(id));
+    let dev = cfg!(debug_assertions).then(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../plugins").join(id));
+    [res, dev].into_iter().flatten().find(|p| p.join("plugin.json").is_file())
+}
+
+fn pack_version(dir: &std::path::Path) -> Option<String> {
+    let text = std::fs::read_to_string(dir.join("plugin.json")).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&text).ok()?;
+    v["version"].as_str().map(str::to_owned)
+}
+
+/// Install each bundled pack with `ve plugin install` unless the user's
+/// plugin folder already has that version. Asks `ve` (not a path of our own)
+/// where plugins live, so the editor and engine always agree.
+fn ensure_packs(app: &tauri::AppHandle, ve_bin: &str) -> Result<(), String> {
+    let mut list = ve(ve_bin)?;
+    // Outside any project, so only user plugins are listed.
+    list.current_dir(std::env::temp_dir()).args(["--json", "plugin", "list"]);
+    let installed: serde_json::Value = serde_json::from_str(&run(list)?).map_err(|e| format!("unexpected ve output: {e}"))?;
+    for id in PACKS {
+        let Some(dir) = bundled_pack(app, id) else { continue };
+        let have = installed["plugins"]
+            .as_array()
+            .and_then(|ps| ps.iter().find(|p| p["id"] == *id && p["source"] == "user"))
+            .and_then(|p| p["version"].as_str());
+        if have.is_some() && have == pack_version(&dir).as_deref() {
+            continue;
+        }
+        let mut install = ve(ve_bin)?;
+        install.args(["--json", "plugin", "install"]).arg(&dir);
+        run(install)?;
+    }
+    Ok(())
+}
+
 /// Start the project's daemon if needed and return its WebSocket URL.
 #[tauri::command]
-async fn daemon_url(ve_bin: String, project: String) -> Result<String, String> {
+async fn daemon_url(app: tauri::AppHandle, ve_bin: String, project: String) -> Result<String, String> {
+    static PACKS_DONE: std::sync::Once = std::sync::Once::new();
+    PACKS_DONE.call_once(|| {
+        if let Err(e) = ensure_packs(&app, &ve_bin) {
+            eprintln!("could not install the bundled effect packs: {e}");
+        }
+    });
     let mut cmd = ve(&ve_bin)?;
     cmd.args(["--json", "--project", &project, "daemon", "start"]);
     let text = run(cmd)?;
